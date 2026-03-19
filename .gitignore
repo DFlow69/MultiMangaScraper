@@ -1,14 +1,49 @@
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.db
+*.log
+
+# Build & Package
 build/
 dist/
 *.spec
-logs/
-Berserk/
-scraep.txt
 *.exe
+
+# Local Settings & Data
+library.json
+settings.json
+happymh_cookies.json
+*.json
+!requirements.txt
+!package.json
+
+# Downloads & Temp
+Downloads/
+*.html
+*.txt
+*.png
+*.jpg
+*.jpeg
+*.webp
+sb_result.html
+baozimh_research/
+
+# IDEs
+.vscode/
+.idea/
 .DS_Store
+
+# Environments
 venv/
 .env
-*.json
-scrapermh.txt
+
+# Custom
+run_tui.bat
+Scraper.spec
+MangaDexGUI.exe
+install_requirements.ps1
+LICENSE
+SECURITY.md
