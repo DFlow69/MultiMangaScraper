@@ -1245,26 +1245,24 @@ class DownloadWorker(QThread):
 
                             get_kwargs = {"stream": True, "timeout": 30}
                             if self.site == "happymh" and requests_cf:
-                                # Use chrome124 impersonation to match recent UA
-                                get_kwargs["impersonate"] = "chrome124"
+                                # Rotate impersonation and UA per request
+                                impersonate_targets = ["chrome124", "chrome120", "chrome131", "edge101"]
+                                target = impersonate_targets[j % len(impersonate_targets)]
+                                get_kwargs["impersonate"] = target
                                 
                                 # Fix 403: Use origin referer and a modern, current Chrome User-Agent
+                                # Remove bot-like Sec-Fetch-* and Cache-Control headers as suggested
                                 headers = {
                                     "Referer": "https://m.happymh.com/",
-                                    "Origin": "https://m.happymh.com",
-                                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                                    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                                    "User-Agent": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{target.replace('chrome', '')}.0.0.0 Safari/537.36" if 'chrome' in target else "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                                    "Accept": "image/avif,image/webp,*/*",
                                     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                                    "Sec-Fetch-Dest": "image",
-                                    "Sec-Fetch-Mode": "no-cors",
-                                    "Sec-Fetch-Site": "same-site",
-                                    "Cache-Control": "no-cache",
-                                    "Pragma": "no-cache"
+                                    "Accept-Encoding": "gzip, deflate, br"
                                 }
                                 get_kwargs["headers"] = headers
                                 if self.debug_mode:
                                     print(f"DEBUG: Ch {ch_num} Page {j} -> {url}")
-                                    print(f"DEBUG: Using impersonate: chrome124")
+                                    print(f"DEBUG: Using impersonate: {target}")
                                     print(f"DEBUG: Req Headers: {headers}")
                             
                             # Fix: curl_cffi.requests.Session.get() returns a response that doesn't 
@@ -1276,14 +1274,13 @@ class DownloadWorker(QThread):
                                 
                                 # Retry logic for 403: some strict CDNs prefer NO referer or different header combos
                                 if r.status_code == 403 and self.site == "happymh":
-                                    if self.debug_mode: print("DEBUG: Got 403, retrying with simplified headers & different impersonation...")
+                                    if self.debug_mode: print("DEBUG: Got 403, retrying with NO Referer & different impersonation...")
                                     
-                                    # Try without Referer/Origin and rotate impersonation
+                                    # Try without Referer and rotate impersonation
                                     retry_headers = headers.copy()
                                     retry_headers.pop("Referer", None)
-                                    retry_headers.pop("Origin", None)
                                     get_kwargs["headers"] = retry_headers
-                                    get_kwargs["impersonate"] = "chrome120" # Rotate
+                                    get_kwargs["impersonate"] = "chrome110" # Different rotation for retry
                                     
                                     r.close()
                                     r = session.get(url, **get_kwargs)
@@ -1646,10 +1643,6 @@ class ModernMangaDexGUI(QMainWindow):
         self.right_layout.addLayout(self.chap_ctrl_layout)
         self.right_layout.addLayout(self.options_layout)
         self.right_layout.addWidget(self.download_btn)
-        self.right_layout.setStretch(0, 0) # info_frame
-        self.right_layout.setStretch(1, 0) # chap_ctrl_layout
-        self.right_layout.setStretch(2, 0) # options_layout
-        self.right_layout.setStretch(3, 0) # download_btn
         
         self.chapter_tree = QTreeWidget()
         self.chapter_tree.setHeaderLabels(["Ch", "Title", "Lang", "Group", "Release Date"])
@@ -1663,7 +1656,14 @@ class ModernMangaDexGUI(QMainWindow):
         header.setSectionResizeMode(1, QHeaderView.Stretch)                             
         header.setSectionResizeMode(3, QHeaderView.Interactive)                           
 
-        self.right_layout.addWidget(self.chapter_tree, stretch=1)
+        self.right_layout.addWidget(self.chapter_tree)
+        
+        # Ensure bottom controls don't get pushed out
+        self.right_layout.setStretch(0, 0) # info_frame
+        self.right_layout.setStretch(1, 0) # chap_ctrl_layout
+        self.right_layout.setStretch(2, 0) # options_layout
+        self.right_layout.setStretch(3, 0) # download_btn
+        self.right_layout.setStretch(4, 1) # chapter_tree (takes remaining space)
 
                                                            
         self.progress_bar = QProgressBar()
