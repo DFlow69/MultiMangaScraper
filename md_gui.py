@@ -1418,30 +1418,30 @@ class DownloadWorker(QThread):
                             get_kwargs = {"stream": True, "timeout": 30}
                             if self.site == "happymh" and requests_cf:
                                 # Rotate impersonation and UA per request
-                                    impersonate_targets = ["chrome124", "chrome120", "chrome131", "edge101"]
-                                    target = impersonate_targets[j % len(impersonate_targets)]
-                                    get_kwargs["impersonate"] = target
-                                    
-                                    # Add proxy if enabled
-                                    if self.use_proxy:
-                                        proxy = self.proxy_list[j % len(self.proxy_list)]
-                                        get_kwargs["proxies"] = {"http": proxy, "https": proxy}
-                                    
-                                    # Fix 403: Use origin referer and a modern, current Chrome User-Agent
-                                    # Remove bot-like Sec-Fetch-* and Cache-Control headers as suggested
-                                    headers = {
-                                        "Referer": "https://m.happymh.com/",
-                                        "User-Agent": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{target.replace('chrome', '')}.0.0.0 Safari/537.36" if 'chrome' in target else "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                                        "Accept": "image/avif,image/webp,*/*",
-                                        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                                        "Accept-Encoding": "gzip, deflate, br"
-                                    }
-                                    get_kwargs["headers"] = headers
-                                    if self.debug_mode:
-                                        print(f"DEBUG: Ch {ch_num} Page {j} -> {url}")
-                                        print(f"DEBUG: Using impersonate: {target}")
-                                        if self.use_proxy: print(f"DEBUG: Using Proxy: {get_kwargs.get('proxies')}")
-                                        print(f"DEBUG: Req Headers: {headers}")
+                                impersonate_targets = ["chrome124", "chrome120", "chrome131", "edge101"]
+                                target = impersonate_targets[j % len(impersonate_targets)]
+                                get_kwargs["impersonate"] = target
+                                
+                                # Add proxy if enabled
+                                if self.use_proxy:
+                                    proxy = self.proxy_list[j % len(self.proxy_list)]
+                                    get_kwargs["proxies"] = {"http": proxy, "https": proxy}
+                                
+                                # Fix 403: Use origin referer and a modern, current Chrome User-Agent
+                                # Remove bot-like Sec-Fetch-* and Cache-Control headers as suggested
+                                headers = {
+                                    "Referer": "https://m.happymh.com/",
+                                    "User-Agent": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{target.replace('chrome', '')}.0.0.0 Safari/537.36" if 'chrome' in target else "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                                    "Accept": "image/avif,image/webp,*/*",
+                                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                                    "Accept-Encoding": "gzip, deflate, br"
+                                }
+                                get_kwargs["headers"] = headers
+                                if self.debug_mode:
+                                    print(f"DEBUG: Ch {ch_num} Page {j} -> {url}")
+                                    print(f"DEBUG: Using impersonate: {target}")
+                                    if self.use_proxy: print(f"DEBUG: Using Proxy: {get_kwargs.get('proxies')}")
+                                    print(f"DEBUG: Req Headers: {headers}")
                                 
                                 # Fix: curl_cffi.requests.Session.get() returns a response that doesn't 
                                 # support 'with' context manager in older versions or specific implementations.
