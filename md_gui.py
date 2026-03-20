@@ -539,32 +539,38 @@ def fetch_happymh_html(url: str, referer: Optional[str] = None) -> Optional[str]
     if research_file.exists():
         try:
             with open(research_file, "r", encoding="utf-8") as f:
-                content = f.read()
+                lines = f.readlines()
+                content = None
                 
                 # Based on user instruction:
                 # 1. <ul class="MuiList-root MuiList-padding MuiList-dense css-1ontqvh"> downwards is the chapter list (manga page)
-                # 2. The rest of the file is the images (reader page)
+                # 2. Line 3 (index 2) contains the whole container of images for the chapter page (reader page)
                 
                 if "/manga/" in url:
-                    # We want the chapter list section specifically from the provided ul tag
+                    # Search entire file for the chapter list container
+                    full_content = "".join(lines)
                     target_ul = '<ul class="MuiList-root MuiList-padding MuiList-dense css-1ontqvh"'
-                    start_idx = content.find(target_ul)
+                    start_idx = full_content.find(target_ul)
                     if start_idx != -1:
                         print(f"FORCED: Using CHAPTER LIST section (from specific UL) from {research_file}")
-                        return content[start_idx:]
+                        return full_content[start_idx:]
                     else:
-                        # Fallback: if we can't find the exact UL, search for any MuiList-root
-                        start_idx = content.find('<ul class="MuiList-root')
+                        # Fallback: search for any MuiList-root
+                        start_idx = full_content.find('<ul class="MuiList-root')
                         if start_idx != -1:
                             print(f"FORCED: Using CHAPTER LIST section (from MuiList-root) from {research_file}")
-                            return content[start_idx:]
-                        return content
+                            return full_content[start_idx:]
+                        return full_content
                 elif "/mangaread/" in url:
-                    # We want the image section
-                    print(f"FORCED: Using IMAGE section from {research_file}")
-                    return content
+                    # Use Line 3 for images as requested
+                    if len(lines) >= 3:
+                        print(f"FORCED: Using IMAGE section (Line 3) from {research_file}")
+                        return lines[2].strip()
+                    else:
+                        print(f"FORCED: Falling back to Line 1 for IMAGE section from {research_file}")
+                        return lines[0].strip()
                 else:
-                    return content
+                    return "".join(lines)
         except Exception as e:
             print(f"Error reading forced research file: {e}")
 
@@ -1212,7 +1218,16 @@ class DownloadWorker(QThread):
                             get_kwargs = {"stream": True, "timeout": 30}
                             if self.site == "happymh" and requests_cf:
                                 get_kwargs["impersonate"] = "chrome120"
-                                get_kwargs["headers"] = {"Referer": referer_url}
+                                # Use referer_url (the chapter reader page) for images
+                                get_kwargs["headers"] = {
+                                    "Referer": referer_url,
+                                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                                    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                                    "Sec-Fetch-Dest": "image",
+                                    "Sec-Fetch-Mode": "no-cors",
+                                    "Sec-Fetch-Site": "same-site"
+                                }
                             
                             # Fix: curl_cffi.requests.Session.get() returns a response that doesn't 
                             # support 'with' context manager in older versions or specific implementations.
