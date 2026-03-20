@@ -535,15 +535,29 @@ def fetch_happymh_response(url: str, referer: Optional[str] = None):
 
 def fetch_happymh_html(url: str, referer: Optional[str] = None) -> Optional[str]:
     # Check if user provided a research file first (Manual Override)
-    # The user wants this to be the primary detection method.
+    # The user clarified:
+    # Line 1 (Index 0): Images of chapters
+    # Line 3 (Index 2): Chapter anchors container
     research_file = Path("baozimh_research/happymh.txt")
     if research_file.exists():
         try:
             with open(research_file, "r", encoding="utf-8") as f:
-                content = f.read()
-                # Check if the file is effectively the chapter/manga page or contains specific content
+                lines = f.readlines()
+                content = None
+                
+                # Manga series page
+                if "/manga/" in url and len(lines) >= 3:
+                    print(f"FORCED: Using MANGA SECTION (Line 3) from {research_file}")
+                    content = lines[2].strip()
+                # Chapter reader page
+                elif "/mangaread/" in url and len(lines) >= 1:
+                    print(f"FORCED: Using CHAPTER SECTION (Line 1) from {research_file}")
+                    content = lines[0].strip()
+                else:
+                    # Fallback to the largest line if we can't decide
+                    content = max(lines, key=len).strip() if lines else None
+                
                 if content and len(content) > 100:
-                    print(f"FORCED: Using manual research file content from {research_file}")
                     return content
         except Exception as e:
             print(f"Error reading forced research file: {e}")
@@ -552,10 +566,6 @@ def fetch_happymh_html(url: str, referer: Optional[str] = None) -> Optional[str]
     r = fetch_happymh_response(url, referer=referer)
     if r:
         return r.text
-    
-    # User requested to only use the manual HTML file and avoid browser fallbacks.
-    # Browser fallbacks (nodriver, SeleniumBase, Playwright) are disabled here 
-    # to prevent unwanted resource usage and stick to the provided raw HTML.
     
     return None
 
@@ -652,7 +662,8 @@ def fetch_chapters_happymh(manga_id: str) -> List[dict]:
     soup = BeautifulSoup(html, "html.parser")
     chapters = []
     
-    # 1. Try standard a tags and data-href elements
+    # 1. Try standard a tags and elements with data-href
+    # Based on research file, chapters can be in <li> or <div> with data-href
     links = soup.select("a[href*='/mangaread/'], *[data-href*='/mangaread/']")
     
     # 2. Try JSON in scripts if too few links
@@ -662,11 +673,13 @@ def fetch_chapters_happymh(manga_id: str) -> List[dict]:
             if not s.string: continue
             if '"chapters"' in s.string and '"id"' in s.string:
                 try:
+                    # Look for a list of chapter objects in JS
                     matches = re.findall(r'\{"id":(\d+),"name":"([^"]+)"', s.string)
                     if matches:
                         for cid, name in matches:
                             href = f"/mangaread/{manga_id}/{cid}"
-                            num_match = re.search(r'(\d+)', name)
+                            # Extract chapter number: "第40话" -> "40"
+                            num_match = re.search(r'(\d+(?:\.\d+)?)', name)
                             chap_num = num_match.group(1) if num_match else "0"
                             chapters.append({
                                 "id": href,
@@ -686,12 +699,30 @@ def fetch_chapters_happymh(manga_id: str) -> List[dict]:
     for link in links:
         href = link.get("href") or link.get("data-href")
         if not href or href in seen_ids: continue
+        
+        # Ensure it's a chapter link for THIS manga
+        if manga_id not in href: continue
         seen_ids.add(href)
         
-        title_tag = link.select_one(".MuiListItemText-primary") or link.select_one("span") or link.select_one(".mg-chapter-name")
-        text = title_tag.get_text(strip=True) if title_tag else link.get_text(strip=True)
+        # Extraction logic for title:
+        # Check primary Mui text first, then span, then whole link text
+        title_tag = link.select_one(".MuiListItemText-primary") or \
+                    link.select_one("span.MuiTypography-root") or \
+                    link.select_one("span") or \
+                    link.select_one(".mg-chapter-name")
         
-        num_match = re.search(r'(\d+)', text)
+        text = title_tag.get_text(strip=True) if title_tag else link.get_text(" ", strip=True)
+        
+        # If text is empty or too short, try parent container text
+        if not text or len(text) < 2:
+            parent = link.find_parent("li") or link.find_parent("div")
+            if parent:
+                text = parent.get_text(" ", strip=True)
+
+        # Extract chapter number: "第40话" -> "40"
+        # We want to be careful with things like dates (2025-11-27)
+        # Usually chapter names start with 第 or are just numbers
+        num_match = re.search(r'(?:第|Ch|Chapter\s*)?(\d+(?:\.\d+)?)', text)
         chap_num = num_match.group(1) if num_match else "0"
         
         chapters.append({
@@ -711,7 +742,8 @@ def fetch_chapters_happymh(manga_id: str) -> List[dict]:
         except:
             return 0.0
             
-    chapters.sort(key=chap_sort_key)
+    # Sort descending by default (usually what users want)
+    chapters.sort(key=chap_sort_key, reverse=True)
     return chapters
 
 def get_happymh_images(chapter_url_path: str, manga_url: Optional[str] = None) -> List[str]:
