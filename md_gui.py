@@ -7,6 +7,7 @@ import re
 import json
 import base64
 import time
+import random
 import requests
 import threading
 import unicodedata
@@ -1117,7 +1118,7 @@ class DownloadWorker(QThread):
     finished = Signal()
     error = Signal(str)
 
-    def __init__(self, chapters, base_dir, use_saver, manga_id=None, make_cbz=False, site="mangadex", debug_mode=False):
+    def __init__(self, chapters, base_dir, use_saver, manga_id=None, make_cbz=False, site="mangadex", debug_mode=False, use_proxy=False):
         super().__init__()
         self.chapters = chapters
         self.base_dir = base_dir
@@ -1126,7 +1127,17 @@ class DownloadWorker(QThread):
         self.make_cbz = make_cbz
         self.site = site
         self.debug_mode = debug_mode
+        self.use_proxy = use_proxy
         self._is_running = True
+        
+        # Working Free Proxies (March 2026)
+        self.proxy_list = [
+            "http://20.210.113.32:80",
+            "http://47.74.253.167:8888",
+            "http://103.175.239.199:80",
+            "http://43.135.36.246:80",
+            "http://154.65.39.37:80"
+        ]
 
     def stop(self):
         self._is_running = False
@@ -1238,7 +1249,6 @@ class DownloadWorker(QThread):
                         try:
                             # Add a random delay between requests to avoid bot detection
                             if j > 1:
-                                import random
                                 delay = random.uniform(1.0, 3.0)
                                 if self.debug_mode: print(f"DEBUG: Sleeping for {delay:.2f}s...")
                                 time.sleep(delay)
@@ -1249,6 +1259,11 @@ class DownloadWorker(QThread):
                                 impersonate_targets = ["chrome124", "chrome120", "chrome131", "edge101"]
                                 target = impersonate_targets[j % len(impersonate_targets)]
                                 get_kwargs["impersonate"] = target
+                                
+                                # Add proxy if enabled
+                                if self.use_proxy:
+                                    proxy = self.proxy_list[j % len(self.proxy_list)]
+                                    get_kwargs["proxies"] = {"http": proxy, "https": proxy}
                                 
                                 # Fix 403: Use origin referer and a modern, current Chrome User-Agent
                                 # Remove bot-like Sec-Fetch-* and Cache-Control headers as suggested
@@ -1263,6 +1278,7 @@ class DownloadWorker(QThread):
                                 if self.debug_mode:
                                     print(f"DEBUG: Ch {ch_num} Page {j} -> {url}")
                                     print(f"DEBUG: Using impersonate: {target}")
+                                    if self.use_proxy: print(f"DEBUG: Using Proxy: {get_kwargs.get('proxies')}")
                                     print(f"DEBUG: Req Headers: {headers}")
                             
                             # Fix: curl_cffi.requests.Session.get() returns a response that doesn't 
@@ -1274,13 +1290,19 @@ class DownloadWorker(QThread):
                                 
                                 # Retry logic for 403: some strict CDNs prefer NO referer or different header combos
                                 if r.status_code == 403 and self.site == "happymh":
-                                    if self.debug_mode: print("DEBUG: Got 403, retrying with NO Referer & different impersonation...")
+                                    if self.debug_mode: print("DEBUG: Got 403, retrying with NO Referer & different impersonation/proxy...")
                                     
                                     # Try without Referer and rotate impersonation
                                     retry_headers = headers.copy()
                                     retry_headers.pop("Referer", None)
                                     get_kwargs["headers"] = retry_headers
                                     get_kwargs["impersonate"] = "chrome110" # Different rotation for retry
+                                    
+                                    # If not using proxy, try one now. If using one, try the next in list.
+                                    next_proxy_idx = (j + 1) % len(self.proxy_list)
+                                    proxy = self.proxy_list[next_proxy_idx]
+                                    get_kwargs["proxies"] = {"http": proxy, "https": proxy}
+                                    if self.debug_mode: print(f"DEBUG: Retry using Proxy: {proxy}")
                                     
                                     r.close()
                                     r = session.get(url, **get_kwargs)
@@ -1631,9 +1653,13 @@ class ModernMangaDexGUI(QMainWindow):
         self.debug_chk = QCheckBox("Debug Mode")
         self.debug_chk.setToolTip("Show detailed logs in terminal for troubleshooting")
         
+        self.proxy_chk = QCheckBox("Use Proxy")
+        self.proxy_chk.setToolTip("Rotate through built-in free proxies (for Happymh 403 errors)")
+        
         self.options_layout.addWidget(self.data_saver_chk)
         self.options_layout.addWidget(self.cbz_chk)
         self.options_layout.addWidget(self.debug_chk)
+        self.options_layout.addWidget(self.proxy_chk)
         self.options_layout.addStretch()
         
         self.download_btn = QPushButton("Download Selected")
@@ -1688,6 +1714,7 @@ class ModernMangaDexGUI(QMainWindow):
         if self.settings.get("data_saver") is False: self.data_saver_chk.setChecked(False)
         if self.settings.get("cbz_mode"): self.cbz_chk.setChecked(True)
         if self.settings.get("debug_mode"): self.debug_chk.setChecked(True)
+        if self.settings.get("use_proxy"): self.proxy_chk.setChecked(True)
 
     def log(self, msg):
         self.log_text.setText(msg)
@@ -2037,7 +2064,8 @@ class ModernMangaDexGUI(QMainWindow):
             manga_id=self.selected_manga['id'],
             make_cbz=self.cbz_chk.isChecked(),
             site=site,
-            debug_mode=self.debug_chk.isChecked()
+            debug_mode=self.debug_chk.isChecked(),
+            use_proxy=self.proxy_chk.isChecked()
         )
         self.download_worker.progress.connect(self.log)
         self.download_worker.percent.connect(self.progress_bar.setValue)
@@ -2066,6 +2094,7 @@ class ModernMangaDexGUI(QMainWindow):
         self.settings["data_saver"] = self.data_saver_chk.isChecked()
         self.settings["cbz_mode"] = self.cbz_chk.isChecked()
         self.settings["debug_mode"] = self.debug_chk.isChecked()
+        self.settings["use_proxy"] = self.proxy_chk.isChecked()
         try:
             with open(SETTINGS_FILE, "w") as f: json.dump(self.settings, f)
         except: pass
