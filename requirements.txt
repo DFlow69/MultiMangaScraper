@@ -12,5 +12,7 @@ nodriver>=0.3.0
 seleniumbase>=4.15.0
 selenium-stealth>=1.0.6
 playwright>=1.35.0
+selenium>=4.15.0
+webdriver-manager>=4.0.0
 frida-tools
 frida-dexdump

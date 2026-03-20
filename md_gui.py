@@ -12,11 +12,22 @@ import requests
 import threading
 import unicodedata
 import traceback
+from PIL import Image
 from bs4 import BeautifulSoup
 try:
     from curl_cffi import requests as requests_cf
 except ImportError:
     requests_cf = None
+
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options as SeleniumOptions
+    from selenium.webdriver.chrome.service import Service as ChromeService
+    from selenium.webdriver.common.by import By
+    from webdriver_manager.chrome import ChromeDriverManager
+    selenium_available = True
+except ImportError:
+    selenium_available = False
 from pathlib import Path
 from typing import List, Optional
 
@@ -1118,7 +1129,7 @@ class DownloadWorker(QThread):
     finished = Signal()
     error = Signal(str)
 
-    def __init__(self, chapters, base_dir, use_saver, manga_id=None, make_cbz=False, site="mangadex", debug_mode=False, use_proxy=False):
+    def __init__(self, chapters, base_dir, use_saver, manga_id=None, make_cbz=False, site="mangadex", debug_mode=False, use_proxy=False, use_selenium=False):
         super().__init__()
         self.chapters = chapters
         self.base_dir = base_dir
@@ -1128,7 +1139,9 @@ class DownloadWorker(QThread):
         self.site = site
         self.debug_mode = debug_mode
         self.use_proxy = use_proxy
+        self.use_selenium = use_selenium
         self._is_running = True
+        self._selenium_driver = None
         
         # Working Free Proxies (March 2026)
         self.proxy_list = [
@@ -1141,6 +1154,49 @@ class DownloadWorker(QThread):
 
     def stop(self):
         self._is_running = False
+        if self._selenium_driver:
+            try:
+                self._selenium_driver.quit()
+            except:
+                pass
+
+    def download_with_selenium(self, img_url, output_path):
+        if not selenium_available:
+            return False
+            
+        if not self._selenium_driver:
+            opts = SeleniumOptions()
+            opts.add_argument("--headless=new")
+            opts.add_argument("--no-sandbox")
+            opts.add_argument("--disable-dev-shm-usage")
+            opts.add_argument("--disable-blink-features=AutomationControlled")
+            opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+            opts.add_experimental_option('useAutomationExtension', False)
+            
+            service = ChromeService(ChromeDriverManager().install())
+            self._selenium_driver = webdriver.Chrome(service=service, options=opts)
+            self._selenium_driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            self._selenium_driver.set_page_load_timeout(30)
+
+        try:
+            self._selenium_driver.get(img_url)
+            import time
+            time.sleep(2)  # Let image load
+            
+            # Get image element and screenshot it
+            img_element = self._selenium_driver.find_element(By.TAG_NAME, "img")
+            img_data = img_element.screenshot_as_png()
+            
+            # Save as JPG
+            import io
+            image = Image.open(io.BytesIO(img_data))
+            image.convert("RGB").save(output_path, "JPEG", quality=95)
+            if self.debug_mode: print(f"DEBUG: Selenium SUCCESS: {output_path}")
+            return True
+            
+        except Exception as e:
+            if self.debug_mode: print(f"DEBUG: Selenium failed: {e}")
+            return False
 
     def run(self):
         total_chaps = len(self.chapters)
@@ -1247,74 +1303,78 @@ class DownloadWorker(QThread):
                             continue
 
                         try:
-                            # Add a random delay between requests to avoid bot detection
-                            if j > 1:
-                                delay = random.uniform(1.0, 3.0)
-                                if self.debug_mode: print(f"DEBUG: Sleeping for {delay:.2f}s...")
-                                time.sleep(delay)
+                            if self.use_selenium and self.site == "happymh":
+                                if not self.download_with_selenium(url, str(dest)):
+                                    raise Exception("Selenium download failed")
+                            else:
+                                # Add a random delay between requests to avoid bot detection
+                                if j > 1:
+                                    delay = random.uniform(1.0, 3.0)
+                                    if self.debug_mode: print(f"DEBUG: Sleeping for {delay:.2f}s...")
+                                    time.sleep(delay)
 
-                            get_kwargs = {"stream": True, "timeout": 30}
-                            if self.site == "happymh" and requests_cf:
-                                # Rotate impersonation and UA per request
-                                impersonate_targets = ["chrome124", "chrome120", "chrome131", "edge101"]
-                                target = impersonate_targets[j % len(impersonate_targets)]
-                                get_kwargs["impersonate"] = target
-                                
-                                # Add proxy if enabled
-                                if self.use_proxy:
-                                    proxy = self.proxy_list[j % len(self.proxy_list)]
-                                    get_kwargs["proxies"] = {"http": proxy, "https": proxy}
-                                
-                                # Fix 403: Use origin referer and a modern, current Chrome User-Agent
-                                # Remove bot-like Sec-Fetch-* and Cache-Control headers as suggested
-                                headers = {
-                                    "Referer": "https://m.happymh.com/",
-                                    "User-Agent": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{target.replace('chrome', '')}.0.0.0 Safari/537.36" if 'chrome' in target else "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                                    "Accept": "image/avif,image/webp,*/*",
-                                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                                    "Accept-Encoding": "gzip, deflate, br"
-                                }
-                                get_kwargs["headers"] = headers
-                                if self.debug_mode:
-                                    print(f"DEBUG: Ch {ch_num} Page {j} -> {url}")
-                                    print(f"DEBUG: Using impersonate: {target}")
-                                    if self.use_proxy: print(f"DEBUG: Using Proxy: {get_kwargs.get('proxies')}")
-                                    print(f"DEBUG: Req Headers: {headers}")
-                            
-                            # Fix: curl_cffi.requests.Session.get() returns a response that doesn't 
-                            # support 'with' context manager in older versions or specific implementations.
-                            r = session.get(url, **get_kwargs)
-                            try:
-                                if self.debug_mode:
-                                    print(f"DEBUG: Response status: {r.status_code}")
-                                
-                                # Retry logic for 403: some strict CDNs prefer NO referer or different header combos
-                                if r.status_code == 403 and self.site == "happymh":
-                                    if self.debug_mode: print("DEBUG: Got 403, retrying with NO Referer & different impersonation/proxy...")
+                                get_kwargs = {"stream": True, "timeout": 30}
+                                if self.site == "happymh" and requests_cf:
+                                    # Rotate impersonation and UA per request
+                                    impersonate_targets = ["chrome124", "chrome120", "chrome131", "edge101"]
+                                    target = impersonate_targets[j % len(impersonate_targets)]
+                                    get_kwargs["impersonate"] = target
                                     
-                                    # Try without Referer and rotate impersonation
-                                    retry_headers = headers.copy()
-                                    retry_headers.pop("Referer", None)
-                                    get_kwargs["headers"] = retry_headers
-                                    get_kwargs["impersonate"] = "chrome110" # Different rotation for retry
+                                    # Add proxy if enabled
+                                    if self.use_proxy:
+                                        proxy = self.proxy_list[j % len(self.proxy_list)]
+                                        get_kwargs["proxies"] = {"http": proxy, "https": proxy}
                                     
-                                    # If not using proxy, try one now. If using one, try the next in list.
-                                    next_proxy_idx = (j + 1) % len(self.proxy_list)
-                                    proxy = self.proxy_list[next_proxy_idx]
-                                    get_kwargs["proxies"] = {"http": proxy, "https": proxy}
-                                    if self.debug_mode: print(f"DEBUG: Retry using Proxy: {proxy}")
+                                    # Fix 403: Use origin referer and a modern, current Chrome User-Agent
+                                    # Remove bot-like Sec-Fetch-* and Cache-Control headers as suggested
+                                    headers = {
+                                        "Referer": "https://m.happymh.com/",
+                                        "User-Agent": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{target.replace('chrome', '')}.0.0.0 Safari/537.36" if 'chrome' in target else "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                                        "Accept": "image/avif,image/webp,*/*",
+                                        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                                        "Accept-Encoding": "gzip, deflate, br"
+                                    }
+                                    get_kwargs["headers"] = headers
+                                    if self.debug_mode:
+                                        print(f"DEBUG: Ch {ch_num} Page {j} -> {url}")
+                                        print(f"DEBUG: Using impersonate: {target}")
+                                        if self.use_proxy: print(f"DEBUG: Using Proxy: {get_kwargs.get('proxies')}")
+                                        print(f"DEBUG: Req Headers: {headers}")
+                                
+                                # Fix: curl_cffi.requests.Session.get() returns a response that doesn't 
+                                # support 'with' context manager in older versions or specific implementations.
+                                r = session.get(url, **get_kwargs)
+                                try:
+                                    if self.debug_mode:
+                                        print(f"DEBUG: Response status: {r.status_code}")
                                     
-                                    r.close()
-                                    r = session.get(url, **get_kwargs)
-                                    if self.debug_mode: print(f"DEBUG: Retry Response status: {r.status_code}")
+                                    # Retry logic for 403: some strict CDNs prefer NO referer or different header combos
+                                    if r.status_code == 403 and self.site == "happymh":
+                                        if self.debug_mode: print("DEBUG: Got 403, retrying with NO Referer & different impersonation/proxy...")
+                                        
+                                        # Try without Referer and rotate impersonation
+                                        retry_headers = headers.copy()
+                                        retry_headers.pop("Referer", None)
+                                        get_kwargs["headers"] = retry_headers
+                                        get_kwargs["impersonate"] = "chrome110" # Different rotation for retry
+                                        
+                                        # If not using proxy, try one now. If using one, try the next in list.
+                                        next_proxy_idx = (j + 1) % len(self.proxy_list)
+                                        proxy = self.proxy_list[next_proxy_idx]
+                                        get_kwargs["proxies"] = {"http": proxy, "https": proxy}
+                                        if self.debug_mode: print(f"DEBUG: Retry using Proxy: {proxy}")
+                                        
+                                        r.close()
+                                        r = session.get(url, **get_kwargs)
+                                        if self.debug_mode: print(f"DEBUG: Retry Response status: {r.status_code}")
 
-                                r.raise_for_status()
-                                with open(dest, "wb") as f:
-                                    for chunk in r.iter_content(8192):
-                                        f.write(chunk)
-                            finally:
-                                if hasattr(r, 'close'):
-                                    r.close()
+                                    r.raise_for_status()
+                                    with open(dest, "wb") as f:
+                                        for chunk in r.iter_content(8192):
+                                            f.write(chunk)
+                                finally:
+                                    if hasattr(r, 'close'):
+                                        r.close()
                         except Exception as e:
                             self.progress.emit(f"Error page {j}: {e}")
                             if self.debug_mode:
@@ -1656,10 +1716,17 @@ class ModernMangaDexGUI(QMainWindow):
         self.proxy_chk = QCheckBox("Use Proxy")
         self.proxy_chk.setToolTip("Rotate through built-in free proxies (for Happymh 403 errors)")
         
+        self.selenium_chk = QCheckBox("Use Selenium")
+        self.selenium_chk.setToolTip("Use headless browser for images (100% bypass, but slower)")
+        if not selenium_available:
+            self.selenium_chk.setEnabled(False)
+            self.selenium_chk.setToolTip("Selenium not installed. Run: pip install selenium webdriver-manager pillow")
+
         self.options_layout.addWidget(self.data_saver_chk)
         self.options_layout.addWidget(self.cbz_chk)
         self.options_layout.addWidget(self.debug_chk)
         self.options_layout.addWidget(self.proxy_chk)
+        self.options_layout.addWidget(self.selenium_chk)
         self.options_layout.addStretch()
         
         self.download_btn = QPushButton("Download Selected")
@@ -1715,6 +1782,7 @@ class ModernMangaDexGUI(QMainWindow):
         if self.settings.get("cbz_mode"): self.cbz_chk.setChecked(True)
         if self.settings.get("debug_mode"): self.debug_chk.setChecked(True)
         if self.settings.get("use_proxy"): self.proxy_chk.setChecked(True)
+        if self.settings.get("use_selenium"): self.selenium_chk.setChecked(True)
 
     def log(self, msg):
         self.log_text.setText(msg)
@@ -2065,7 +2133,8 @@ class ModernMangaDexGUI(QMainWindow):
             make_cbz=self.cbz_chk.isChecked(),
             site=site,
             debug_mode=self.debug_chk.isChecked(),
-            use_proxy=self.proxy_chk.isChecked()
+            use_proxy=self.proxy_chk.isChecked(),
+            use_selenium=self.selenium_chk.isChecked()
         )
         self.download_worker.progress.connect(self.log)
         self.download_worker.percent.connect(self.progress_bar.setValue)
@@ -2095,6 +2164,7 @@ class ModernMangaDexGUI(QMainWindow):
         self.settings["cbz_mode"] = self.cbz_chk.isChecked()
         self.settings["debug_mode"] = self.debug_chk.isChecked()
         self.settings["use_proxy"] = self.proxy_chk.isChecked()
+        self.settings["use_selenium"] = self.selenium_chk.isChecked()
         try:
             with open(SETTINGS_FILE, "w") as f: json.dump(self.settings, f)
         except: pass
