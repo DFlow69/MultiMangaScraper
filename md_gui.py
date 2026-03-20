@@ -535,34 +535,38 @@ def fetch_happymh_response(url: str, referer: Optional[str] = None):
 
 def fetch_happymh_html(url: str, referer: Optional[str] = None) -> Optional[str]:
     # Check if user provided a research file first (Manual Override)
-    # The user clarified:
-    # Line 1 (Index 0): Images of chapters
-    # Line 3 (Index 2): Chapter anchors container
     research_file = Path("baozimh_research/happymh.txt")
     if research_file.exists():
         try:
             with open(research_file, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-                content = None
+                content = f.read()
                 
-                # Manga series page
-                if "/manga/" in url and len(lines) >= 3:
-                    print(f"FORCED: Using MANGA SECTION (Line 3) from {research_file}")
-                    content = lines[2].strip()
-                # Chapter reader page
-                elif "/mangaread/" in url and len(lines) >= 1:
-                    print(f"FORCED: Using CHAPTER SECTION (Line 1) from {research_file}")
-                    content = lines[0].strip()
+                # Based on user instruction:
+                # 1. <ul class="MuiList-root ..."> downwards is the chapter list (manga page)
+                # 2. The rest of the file is the images (reader page)
+                
+                if "/manga/" in url:
+                    # We want the chapter list section
+                    start_idx = content.find('<ul class="MuiList-root')
+                    if start_idx != -1:
+                        print(f"FORCED: Using CHAPTER LIST section from {research_file}")
+                        return content[start_idx:]
+                    else:
+                        # Fallback: if we can't find the ul, maybe it's just the whole file
+                        return content
+                elif "/mangaread/" in url:
+                    # We want the image section
+                    # The user said "the rest of the file is the images"
+                    # But line 1 usually contains the reader images.
+                    # We'll return the whole file so get_happymh_images can scan it.
+                    print(f"FORCED: Using IMAGE section from {research_file}")
+                    return content
                 else:
-                    # Fallback to the largest line if we can't decide
-                    content = max(lines, key=len).strip() if lines else None
-                
-                if content and len(content) > 100:
                     return content
         except Exception as e:
             print(f"Error reading forced research file: {e}")
 
-    # Only if research file doesn't exist or is empty do we try network requests
+    # Only if research file doesn't exist do we try network requests
     r = fetch_happymh_response(url, referer=referer)
     if r:
         return r.text
@@ -701,7 +705,8 @@ def fetch_chapters_happymh(manga_id: str) -> List[dict]:
         if not href or href in seen_ids: continue
         
         # Ensure it's a chapter link for THIS manga
-        if manga_id not in href: continue
+        # In the research file, href is like /mangaread/manga-id/chapter-id
+        if manga_id not in href and "/mangaread/" not in href: continue
         seen_ids.add(href)
         
         # Extraction logic for title:
