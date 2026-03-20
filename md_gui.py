@@ -1233,10 +1233,13 @@ class DownloadWorker(QThread):
                             continue
 
                         try:
-                            # Add a small delay between requests to avoid bot detection
+                            # Add a random delay between requests to avoid bot detection
                             if j > 1:
                                 import time
-                                time.sleep(1.0)
+                                import random
+                                delay = random.uniform(1.0, 3.0)
+                                if self.debug_mode: print(f"DEBUG: Sleeping for {delay:.2f}s...")
+                                time.sleep(delay)
 
                             get_kwargs = {"stream": True, "timeout": 30}
                             if self.site == "happymh" and requests_cf:
@@ -1636,8 +1639,11 @@ class ModernMangaDexGUI(QMainWindow):
         self.right_layout.addLayout(self.chap_ctrl_layout)
         self.right_layout.addLayout(self.options_layout)
         self.right_layout.addWidget(self.download_btn)
-
-                                                        
+        self.right_layout.setStretch(0, 0) # info_frame
+        self.right_layout.setStretch(1, 0) # chap_ctrl_layout
+        self.right_layout.setStretch(2, 0) # options_layout
+        self.right_layout.setStretch(3, 0) # download_btn
+        
         self.chapter_tree = QTreeWidget()
         self.chapter_tree.setHeaderLabels(["Ch", "Title", "Lang", "Group", "Release Date"])
         self.chapter_tree.setAlternatingRowColors(True)
