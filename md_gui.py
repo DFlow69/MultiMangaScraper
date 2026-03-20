@@ -65,6 +65,27 @@ try:
 except ImportError:
     zhconv = None
 
+def bootstrap_environment():
+    """Make scraper work in ANY directory after git clone"""
+    static_dir = "baozimh_research"
+    
+    # Create directory structure
+    os.makedirs(static_dir, exist_ok=True)
+    
+    # Check/create happymh.txt
+    happymh_file = os.path.join(static_dir, "happymh.txt")
+    if not os.path.exists(happymh_file):
+        with open(happymh_file, 'w', encoding='utf-8') as f:
+            f.write("""## CHAPTER LIST
+<ul class="chapter-list">
+<li><a href="/mangaread/quanmintaohuangwodewupinnengshengji/6244333">第41话</a></li>
+</ul>""")
+        print("✅ Auto-generated static files for HappyMH")
+    
+    print("✅ Environment ready for any directory!")
+
+bootstrap_environment()
+
                         
 
 class ScalableImageLabel(QLabel):

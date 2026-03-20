@@ -29,8 +29,9 @@ Downloads/
 *.jpeg
 *.webp
 sb_result.html
+# Static research files (REGENERATE on first run)
 baozimh_research/
-WSA/
+!baozimh_research/.gitkeep
 
 # IDEs
 .vscode/
