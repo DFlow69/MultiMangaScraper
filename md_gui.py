@@ -1179,36 +1179,55 @@ class DownloadWorker(QThread):
             
             service = ChromeService(ChromeDriverManager().install())
             self._selenium_driver = webdriver.Chrome(service=service, options=opts)
+            # Standard Stealth Script
             self._selenium_driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             self._selenium_driver.set_page_load_timeout(60)
 
         try:
             if self.debug_mode: print(f"DEBUG: Loading chapter page: {chapter_url}")
-            self.progress.emit(f"Bypassing Cloudflare for Chapter {ch_num}...")
+            self.progress.emit(f"Bypassing Cloudflare + loading images for Ch {ch_num}...")
             self._selenium_driver.get(chapter_url)
             
-            # Wait for Cloudflare/JS
-            WebDriverWait(self._selenium_driver, 30).until(
-                lambda d: d.execute_script("return document.readyState") == "complete"
-            )
-            # User specifically asked for 10s wait for JS challenges
-            import time
-            time.sleep(10)
-            
-            # Extract scan0, scan1... up to 50
+            # Wait for main container to ensure React started
+            try:
+                WebDriverWait(self._selenium_driver, 20).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "article.css-8o1tmw-root"))
+                )
+            except:
+                if self.debug_mode: print("DEBUG: Container article.css-8o1tmw-root not found, waiting for body...")
+                WebDriverWait(self._selenium_driver, 10).until(
+                    lambda d: d.execute_script("return document.readyState") == "complete"
+                )
+
+            # AGGRESSIVE SCROLLING for Lazy Loading
+            if self.debug_mode: print("DEBUG: Scrolling to load all images...")
+            last_height = self._selenium_driver.execute_script("return document.body.scrollHeight")
+            for scroll_step in range(10):
+                self._selenium_driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                import time
+                time.sleep(3)
+                new_height = self._selenium_driver.execute_script("return document.body.scrollHeight")
+                if new_height == last_height and scroll_step > 3: break
+                last_height = new_height
+
+            # Extract scan0-scan50
             urls = []
-            for k in range(50):
+            if self.debug_mode: print("DEBUG: Extracting image URLs...")
+            for k in range(51):
                 try:
-                    img = self._selenium_driver.find_element(By.ID, f"scan{k}")
+                    # Short wait per image to allow lazy load to trigger
+                    img = WebDriverWait(self._selenium_driver, 2).until(
+                        EC.presence_of_element_located((By.ID, f"scan{k}"))
+                    )
                     src = img.get_attribute("src")
-                    if src and src.startswith("http"):
+                    if src and "ruicdn.happymh.com" in src:
                         urls.append(src)
+                        if self.debug_mode: print(f"DEBUG: Found scan{k}: {src[:60]}...")
                 except:
-                    # If we can't find scan{k}, we've reached the end of the chapter
-                    break
+                    # If we skip one, maybe it's not there. We keep going a bit just in case.
+                    if k > 5: break 
             
             if not urls:
-                # Fallback to manual file parser if Selenium found no scans
                 if self.debug_mode: print("DEBUG: Selenium found no scans, falling back to manual file parser")
                 manga_url = f"{HAPPYMH_BASE}/manga/{self.manga_id}"
                 urls = get_happymh_images(chap['id'], manga_url=manga_url)
@@ -1217,10 +1236,12 @@ class DownloadWorker(QThread):
                 self.progress.emit(f"No images found for Ch {ch_num}")
                 return False
 
+            self.progress.emit(f"SUCCESS: Found {len(urls)} images! Starting high-speed download...")
             if not out_path.exists():
                 out_path.mkdir(parents=True, exist_ok=True)
 
             total_imgs = len(urls)
+            # Use direct connection for Bulgaria (disable proxies for Happymh downloads)
             session = get_happymh_session(impersonate="chrome124")
 
             for j, url in enumerate(urls, 1):
@@ -1238,18 +1259,16 @@ class DownloadWorker(QThread):
                         # Random delay between requests
                         import random
                         delay = random.uniform(1.0, 3.0)
-                        if self.debug_mode: print(f"DEBUG: Sleeping for {delay:.2f}s...")
                         time.sleep(delay)
 
                         get_kwargs = {"stream": True, "timeout": 30}
-                        # Use existing curl_cffi logic
-                        impersonate_targets = ["chrome124", "chrome120", "chrome131", "edge101"]
+                        # EU-optimized headers (Sofia, Bulgaria)
+                        impersonate_targets = ["chrome124", "chrome120", "chrome131"]
                         target = impersonate_targets[j % len(impersonate_targets)]
                         get_kwargs["impersonate"] = target
                         
-                        if self.use_proxy:
-                            proxy = self.proxy_list[j % len(self.proxy_list)]
-                            get_kwargs["proxies"] = {"http": proxy, "https": proxy}
+                        # FORCE DIRECT CONNECTION (Disable Proxies for Happymh)
+                        get_kwargs["proxies"] = None
                         
                         headers = {
                             "Referer": "https://m.happymh.com/",
@@ -1260,23 +1279,15 @@ class DownloadWorker(QThread):
                         }
                         get_kwargs["headers"] = headers
                         
-                        if self.debug_mode:
-                            print(f"DEBUG: Ch {ch_num} Page {j} -> {url}")
-                            print(f"DEBUG: Using impersonate: {target}")
-                        
                         r = session.get(url, **get_kwargs)
                         try:
-                            if self.debug_mode: print(f"DEBUG: Response status: {r.status_code}")
-                            
                             if r.status_code == 403:
                                 # Retry without Referer
-                                if self.debug_mode: print("DEBUG: Got 403, retrying without Referer...")
                                 retry_headers = headers.copy()
                                 retry_headers.pop("Referer", None)
                                 get_kwargs["headers"] = retry_headers
                                 r.close()
                                 r = session.get(url, **get_kwargs)
-                                if self.debug_mode: print(f"DEBUG: Retry Response status: {r.status_code}")
                             
                             r.raise_for_status()
                             with open(dest, "wb") as f:
@@ -1295,7 +1306,9 @@ class DownloadWorker(QThread):
             
             return True
         except Exception as e:
-            if self.debug_mode: print(f"DEBUG: Happymh Hybrid failed: {e}")
+            if self.debug_mode: 
+                print(f"DEBUG: Happymh Hybrid failed: {e}")
+                traceback.print_exc()
             return False
 
     def run(self):
@@ -1418,17 +1431,11 @@ class DownloadWorker(QThread):
                             get_kwargs = {"stream": True, "timeout": 30}
                             if self.site == "happymh" and requests_cf:
                                 # Rotate impersonation and UA per request
-                                impersonate_targets = ["chrome124", "chrome120", "chrome131", "edge101"]
+                                impersonate_targets = ["chrome124", "chrome120", "chrome131"]
                                 target = impersonate_targets[j % len(impersonate_targets)]
                                 get_kwargs["impersonate"] = target
                                 
-                                # Add proxy if enabled
-                                if self.use_proxy:
-                                    proxy = self.proxy_list[j % len(self.proxy_list)]
-                                    get_kwargs["proxies"] = {"http": proxy, "https": proxy}
-                                
-                                # Fix 403: Use origin referer and a modern, current Chrome User-Agent
-                                # Remove bot-like Sec-Fetch-* and Cache-Control headers as suggested
+                                # EU-optimized headers (Sofia, Bulgaria) - No Bot Signals
                                 headers = {
                                     "Referer": "https://m.happymh.com/",
                                     "User-Agent": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{target.replace('chrome', '')}.0.0.0 Safari/537.36" if 'chrome' in target else "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -1437,10 +1444,12 @@ class DownloadWorker(QThread):
                                     "Accept-Encoding": "gzip, deflate, br"
                                 }
                                 get_kwargs["headers"] = headers
+                                # Disable proxies for direct EU connection to Happymh
+                                get_kwargs["proxies"] = None
+                                
                                 if self.debug_mode:
                                     print(f"DEBUG: Ch {ch_num} Page {j} -> {url}")
                                     print(f"DEBUG: Using impersonate: {target}")
-                                    if self.use_proxy: print(f"DEBUG: Using Proxy: {get_kwargs.get('proxies')}")
                                     print(f"DEBUG: Req Headers: {headers}")
                                 
                                 # Fix: curl_cffi.requests.Session.get() returns a response that doesn't 
