@@ -473,12 +473,13 @@ def fetch_baozimh_html(url: str, params: dict | None = None) -> str | None:
 HAPPYMH_SESSION = None
 SESSION_LOCK = threading.Lock()
 
-def get_happymh_session():
+def get_happymh_session(impersonate: Optional[str] = None):
     global HAPPYMH_SESSION
     with SESSION_LOCK:
         if HAPPYMH_SESSION is None:
             if requests_cf:
-                HAPPYMH_SESSION = requests_cf.Session()
+                # Initialize session with impersonation if provided
+                HAPPYMH_SESSION = requests_cf.Session(impersonate=impersonate)
                 cookie_file = Path("happymh_cookies.json")
                 if cookie_file.exists():
                     try:
@@ -490,21 +491,23 @@ def get_happymh_session():
     return HAPPYMH_SESSION
 
 def fetch_happymh_response(url: str, referer: Optional[str] = None):
-    session = get_happymh_session()
+    session = get_happymh_session(impersonate="chrome124")
     ref = referer or HAPPYMH_BASE
     
     # Use curl_cffi for Cloudflare bypass if available
     if requests_cf and isinstance(session, requests_cf.Session):
         try:
+            # Use chrome124 impersonation to match recent UA
             r = session.get(
                 url, 
-                impersonate="chrome120", 
+                impersonate="chrome124", 
                 timeout=20, 
                 headers={
                     "Referer": ref,
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                    "Sec-Ch-Ua": '"Chromium";v="120", "Google Chrome";v="120", "Not-A.Brand";v="99"',
+                    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
                     "Sec-Ch-Ua-Mobile": "?0",
                     "Sec-Ch-Ua-Platform": '"Windows"',
                     "Sec-Fetch-Dest": "document",
@@ -520,7 +523,7 @@ def fetch_happymh_response(url: str, referer: Optional[str] = None):
             print(f"Happymh CF Error: {e}")
             
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Referer": ref,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
@@ -1205,7 +1208,7 @@ class DownloadWorker(QThread):
                 session = None
                 referer_url = HAPPYMH_BASE
                 if self.site == "happymh":
-                    session = get_happymh_session()
+                    session = get_happymh_session(impersonate="chrome124")
                     referer_url = f"{HAPPYMH_BASE}{chap['id']}" if chap['id'].startswith("/") else chap['id']
                 else:
                     session = requests.Session()
@@ -1235,7 +1238,6 @@ class DownloadWorker(QThread):
                         try:
                             # Add a random delay between requests to avoid bot detection
                             if j > 1:
-                                import time
                                 import random
                                 delay = random.uniform(1.0, 3.0)
                                 if self.debug_mode: print(f"DEBUG: Sleeping for {delay:.2f}s...")
@@ -1243,8 +1245,9 @@ class DownloadWorker(QThread):
 
                             get_kwargs = {"stream": True, "timeout": 30}
                             if self.site == "happymh" and requests_cf:
-                                # Use a more recent impersonation target and User-Agent
+                                # Use chrome124 impersonation to match recent UA
                                 get_kwargs["impersonate"] = "chrome124"
+                                
                                 # Fix 403: Use origin referer and a modern, current Chrome User-Agent
                                 headers = {
                                     "Referer": "https://m.happymh.com/",
@@ -1261,6 +1264,7 @@ class DownloadWorker(QThread):
                                 get_kwargs["headers"] = headers
                                 if self.debug_mode:
                                     print(f"DEBUG: Ch {ch_num} Page {j} -> {url}")
+                                    print(f"DEBUG: Using impersonate: chrome124")
                                     print(f"DEBUG: Req Headers: {headers}")
                             
                             # Fix: curl_cffi.requests.Session.get() returns a response that doesn't 
@@ -1272,12 +1276,15 @@ class DownloadWorker(QThread):
                                 
                                 # Retry logic for 403: some strict CDNs prefer NO referer or different header combos
                                 if r.status_code == 403 and self.site == "happymh":
-                                    if self.debug_mode: print("DEBUG: Got 403, retrying with simplified headers...")
-                                    # Try without Referer/Origin first
+                                    if self.debug_mode: print("DEBUG: Got 403, retrying with simplified headers & different impersonation...")
+                                    
+                                    # Try without Referer/Origin and rotate impersonation
                                     retry_headers = headers.copy()
                                     retry_headers.pop("Referer", None)
                                     retry_headers.pop("Origin", None)
                                     get_kwargs["headers"] = retry_headers
+                                    get_kwargs["impersonate"] = "chrome120" # Rotate
+                                    
                                     r.close()
                                     r = session.get(url, **get_kwargs)
                                     if self.debug_mode: print(f"DEBUG: Retry Response status: {r.status_code}")
