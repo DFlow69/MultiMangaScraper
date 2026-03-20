@@ -10,9 +10,16 @@ import time
 import random
 import requests
 import threading
+import concurrent.futures
 import unicodedata
 import traceback
+from urllib.parse import urljoin, urlparse
 from PIL import Image
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+except ImportError:
+    pass
 from bs4 import BeautifulSoup
 try:
     from curl_cffi import requests as requests_cf
@@ -26,10 +33,18 @@ try:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import UnexpectedAlertPresentException, NoAlertPresentException
     from webdriver_manager.chrome import ChromeDriverManager
+    from seleniumbase import Driver
+    try:
+        import undetected_chromedriver as uc
+        uc_available = True
+    except ImportError:
+        uc_available = False
     selenium_available = True
 except ImportError:
     selenium_available = False
+    uc_available = False
 from pathlib import Path
 from typing import List, Optional
 
@@ -569,24 +584,26 @@ def fetch_happymh_html(url: str, referer: Optional[str] = None) -> Optional[str]
                     target_ul = '<ul class="MuiList-root MuiList-padding MuiList-dense css-1ontqvh"'
                     start_idx = full_content.find(target_ul)
                     if start_idx != -1:
-                        print(f"FORCED: Using CHAPTER LIST section (from specific UL) from {research_file}")
+                        print(f"DEBUG: FORCED - Using CHAPTER LIST section (from specific UL) from {research_file}")
                         return full_content[start_idx:]
                     else:
                         # Fallback: search for any MuiList-root
                         start_idx = full_content.find('<ul class="MuiList-root')
                         if start_idx != -1:
-                            print(f"FORCED: Using CHAPTER LIST section (from MuiList-root) from {research_file}")
+                            print(f"DEBUG: FORCED - Using CHAPTER LIST section (from MuiList-root) from {research_file}")
                             return full_content[start_idx:]
+                        print(f"DEBUG: FORCED - Using full content for CHAPTER LIST from {research_file}")
                         return full_content
                 elif "/mangaread/" in url:
                     # For reader pages, use the whole file to ensure we don't miss any containers
                     # (User mentioned Line 3, but the file might have images in other lines too)
-                    print(f"FORCED: Using full content for IMAGE section from {research_file}")
+                    print(f"DEBUG: FORCED - Using full content for IMAGE section from {research_file}")
                     return "".join(lines)
                 else:
+                    print(f"DEBUG: FORCED - Using research file content for unknown URL type: {url}")
                     return "".join(lines)
         except Exception as e:
-            print(f"Error reading forced research file: {e}")
+            print(f"DEBUG: Error reading forced research file: {e}")
 
     # Only if research file doesn't exist do we try network requests
     r = fetch_happymh_response(url, referer=referer)
@@ -828,7 +845,9 @@ def get_happymh_images(chapter_url_path: str, manga_url: Optional[str] = None) -
 
     if images_with_order:
         images_with_order.sort()
-        return [x[1] for x in images_with_order]
+        found_urls = [x[1] for x in images_with_order]
+        print(f"DEBUG: Found {len(found_urls)} images using scanID method")
+        return found_urls
 
     # --- Fallback Methods if no scan IDs found ---
     images = []
@@ -1058,6 +1077,94 @@ def get_baozimh_images(chapter_url_path: str) -> List[str]:
         
     return BAOZI_CLIENT.get_chapter_images(base_url)
 
+def fetch_chapters_newtoki(manga_url: str, worker=None) -> List[dict]:
+    if not uc_available:
+        print("Error: undetected-chromedriver is not installed.")
+        return []
+    
+    options = uc.ChromeOptions()
+    # User might need manual captcha solving, so don't use headless
+    driver = uc.Chrome(options=options, version_main=146)
+    
+    try:
+        driver.get(manga_url)
+        msg = (
+            "NEW TOKI WORKFLOW:\n"
+            "1. Solve Cloudflare + CAPTCHA in the browser window.\n"
+            "2. STAY on the series/chapter page once it loads.\n"
+            "3. Click 'Solved' in this dialog to detect chapters.\n"
+            "4. The script will handle slow, human-like navigation later."
+        )
+        
+        if worker:
+            while True:
+                res = worker.wait_for_captcha(msg)
+                if res == "success":
+                    break
+                elif res == "retry":
+                    driver.get(manga_url)
+                    continue
+                else:
+                    return []
+        else:
+            print("\n" + "="*50)
+            print(msg)
+            print("="*50 + "\n")
+            input("Press Enter in console after solving captcha...")
+        
+        # EXTRACT chapters from CURRENT PAGE (no extra navigation)
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        chapters = []
+        
+        parsed_orig = urlparse(manga_url)
+        base_domain = f"{parsed_orig.scheme}://{parsed_orig.netloc}"
+
+        # NewToki uses <select name="wr_id"> for chapters
+        select_tag = soup.find("select", {"name": "wr_id"})
+        if select_tag:
+            options_tags = select_tag.find_all("option")
+            for opt in options_tags:
+                val = opt.get("value")
+                if val:
+                    # Construct chapter URL - NewToki expects /webtoon/[ID] or /view/[ID]
+                    # We will validate the exact URL later in the download loop
+                    chapter_url = f"{base_domain}/webtoon/{val}" 
+                    title = opt.text.strip()
+                    chapters.append({
+                        "id": val, 
+                        "chapter": title,
+                        "title": title,
+                        "language": "ko",
+                        "groups": [],
+                        "publishAt": "",
+                        "source": "newtoki",
+                        "full_url": chapter_url
+                    })
+        
+        # Fallback: look for list-item links
+        if not chapters:
+            links = soup.find_all("a", href=re.compile(r"/view/|/comic/"))
+            for link in links:
+                href = link.get("href")
+                title = link.text.strip()
+                if href and title and "/view/" in href:
+                    chapters.append({
+                        "id": href,
+                        "chapter": title,
+                        "title": title,
+                        "language": "ko",
+                        "groups": [],
+                        "publishAt": "",
+                        "source": "newtoki"
+                    })
+        
+        return chapters
+    except Exception as e:
+        print(f"NewToki error: {e}")
+        return []
+    finally:
+        driver.quit()
+
 class SearchWorker(QThread):
     finished = Signal(list)
     error = Signal(str)
@@ -1075,6 +1182,22 @@ class SearchWorker(QThread):
                 results = search_baozimh(self.query)
             elif self.site == "happymh":
                 results = search_happymh(self.query)
+            elif self.site == "newtoki":
+                # For NewToki, we often search by pasting URL directly
+                if self.query.startswith("http"):
+                    results = [{
+                        "id": self.query,
+                        "title": "NewToki Series (Direct URL)",
+                        "attributes": {"title": {"en": "NewToki Series", "zh": "NewToki Series"}},
+                        "status": "Unknown",
+                        "description": "Directly loaded from URL",
+                        "cover_filename": None,
+                        "cover_url": "",
+                        "available_languages": ["ko"],
+                        "source": "newtoki"
+                    }]
+                else:
+                    results = [] # Search not implemented for NewToki, only direct URL
             else:
                 results = search_manga(self.query)
             
@@ -1087,12 +1210,28 @@ class SearchWorker(QThread):
 class ChapterWorker(QThread):
     finished = Signal(list)
     error = Signal(str)
+    captcha_requested = Signal(str)
 
     def __init__(self, manga_id, langs=None, site="mangadex"):
         super().__init__()
         self.manga_id = manga_id
         self.langs = langs
         self.site = site
+        self.captcha_response = None
+        self._is_running = True
+
+    def set_captcha_response(self, response):
+        self.captcha_response = response
+
+    def stop(self):
+        self._is_running = False
+
+    def wait_for_captcha(self, message):
+        self.captcha_response = None
+        self.captcha_requested.emit(message)
+        while self.captcha_response is None and self._is_running:
+            time.sleep(0.5)
+        return self.captcha_response
 
     def run(self):
         try:
@@ -1105,6 +1244,8 @@ class ChapterWorker(QThread):
                 if not chapters:
                     self.error.emit("Happymh returned 0 chapters. This might be due to Cloudflare protection. Try pasting the direct URL or providing cookies in 'happymh_cookies.json'.")
                     return
+            elif self.site == "newtoki":
+                chapters = fetch_chapters_newtoki(self.manga_id, worker=self)
             else:
                 chapters = fetch_chapters_for_manga(self.manga_id, self.langs)
             
@@ -1130,8 +1271,9 @@ class DownloadWorker(QThread):
     percent = Signal(int)
     finished = Signal()
     error = Signal(str)
+    captcha_requested = Signal(str)
 
-    def __init__(self, chapters, base_dir, use_saver, manga_id=None, make_cbz=False, site="mangadex", debug_mode=False, use_proxy=False, use_selenium=False):
+    def __init__(self, chapters, base_dir, use_saver, manga_id=None, make_cbz=False, site="mangadex", debug_mode=False, use_proxy=True, use_selenium=True):
         super().__init__()
         self.chapters = chapters
         self.base_dir = base_dir
@@ -1144,6 +1286,18 @@ class DownloadWorker(QThread):
         self.use_selenium = use_selenium
         self._is_running = True
         self._selenium_driver = None
+        self._newtoki_driver = None
+        self.captcha_response = None
+
+    def set_captcha_response(self, response):
+        self.captcha_response = response
+
+    def wait_for_captcha(self, message):
+        self.captcha_response = None
+        self.captcha_requested.emit(message)
+        while self.captcha_response is None and self._is_running:
+            time.sleep(0.5)
+        return self.captcha_response
         
         # Working Free Proxies (March 2026)
         self.proxy_list = [
@@ -1161,89 +1315,94 @@ class DownloadWorker(QThread):
                 self._selenium_driver.quit()
             except:
                 pass
+        if self._newtoki_driver:
+            try:
+                self._newtoki_driver.quit()
+            except:
+                pass
 
-    def download_chapter_happymh(self, chapter_url, out_path, ch_num, i, total_chaps, chap):
+    def download_chapter_complete(self, chapter_url, out_path, ch_num, i, total_chaps, chap):
         if not selenium_available:
             self.progress.emit("Selenium not available for Happymh extraction")
             return False
             
         if not self._selenium_driver:
-            opts = SeleniumOptions()
-            opts.add_argument("--headless=new")
-            opts.add_argument("--no-sandbox")
-            opts.add_argument("--disable-dev-shm-usage")
-            # Cloudflare Bypass Options
-            opts.add_argument('--disable-blink-features=AutomationControlled')
-            opts.add_experimental_option("excludeSwitches", ["enable-automation"])
-            opts.add_experimental_option('useAutomationExtension', False)
-            
-            service = ChromeService(ChromeDriverManager().install())
-            self._selenium_driver = webdriver.Chrome(service=service, options=opts)
-            # Standard Stealth Script
-            self._selenium_driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            self._selenium_driver.set_page_load_timeout(60)
+            self.progress.emit("Launching SeleniumBase UC Mode (Visible)...")
+            # UC Mode Chrome (uc=True, headless=False) - WATCH bypass live
+            self._selenium_driver = Driver(uc=True, headless=False)
+            self._selenium_driver.set_page_load_timeout(120)
 
         try:
             if self.debug_mode: print(f"DEBUG: Loading chapter page: {chapter_url}")
-            self.progress.emit(f"Bypassing Cloudflare + loading images for Ch {ch_num}...")
-            self._selenium_driver.get(chapter_url)
+            self.progress.emit(f"Bypassing Cloudflare for Ch {ch_num} (120s limit)...")
             
-            # Wait for main container to ensure React started
+            # 1. Selenium loads chapter
+            self._selenium_driver.uc_open_with_reconnect(chapter_url, 6)
+            
+            # 120s Cloudflare wait until "Just a moment" AND "人机验证" gone
             try:
-                WebDriverWait(self._selenium_driver, 20).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "article.css-8o1tmw-root"))
+                WebDriverWait(self._selenium_driver, 120).until_not(
+                    EC.title_contains("Just a moment")
                 )
-            except:
-                if self.debug_mode: print("DEBUG: Container article.css-8o1tmw-root not found, waiting for body...")
-                WebDriverWait(self._selenium_driver, 10).until(
-                    lambda d: d.execute_script("return document.readyState") == "complete"
+                WebDriverWait(self._selenium_driver, 120).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "article.css-8o1tmw-root, div.css-1krjvn-imgContainer, img[id^='scan']"))
                 )
+                if self.debug_mode: print(f"DEBUG: TITLE OK: {self._selenium_driver.title}")
+            except Exception as e:
+                if self.debug_mode: 
+                    print(f"DEBUG: UC Bypass/Wait timed out or failed: {e}")
+                    print(f"DEBUG: Page Title: {self._selenium_driver.title}")
 
-            # AGGRESSIVE SCROLLING for Lazy Loading
-            if self.debug_mode: print("DEBUG: Scrolling to load all images...")
-            last_height = self._selenium_driver.execute_script("return document.body.scrollHeight")
-            for scroll_step in range(10):
+            # 2. Aggressive scroll x10 for lazy loading (scan0-scan50)
+            if self.debug_mode: print("DEBUG: Starting aggressive scrolling (x15)...")
+            for scroll_step in range(15):
                 self._selenium_driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                import time
-                time.sleep(3)
-                new_height = self._selenium_driver.execute_script("return document.body.scrollHeight")
-                if new_height == last_height and scroll_step > 3: break
-                last_height = new_height
+                time.sleep(2)
+                self._selenium_driver.execute_script(f"window.scrollBy(0, {-random.randint(50, 150)});")
+                if self.debug_mode and scroll_step % 5 == 0:
+                    height = self._selenium_driver.execute_script("return document.body.scrollHeight")
+                    print(f"DEBUG: Scroll step {scroll_step}, Height: {height}")
 
-            # Extract scan0-scan50
+            # 3. Extract scan0-scan50 URLs
             urls = []
             if self.debug_mode: print("DEBUG: Extracting image URLs...")
             for k in range(51):
                 try:
-                    # Short wait per image to allow lazy load to trigger
-                    img = WebDriverWait(self._selenium_driver, 2).until(
-                        EC.presence_of_element_located((By.ID, f"scan{k}"))
-                    )
+                    img = self._selenium_driver.find_element(By.ID, f"scan{k}")
                     src = img.get_attribute("src")
                     if src and "ruicdn.happymh.com" in src:
                         urls.append(src)
-                        if self.debug_mode: print(f"DEBUG: Found scan{k}: {src[:60]}...")
                 except:
-                    # If we skip one, maybe it's not there. We keep going a bit just in case.
                     if k > 5: break 
             
+            # Fallback to manual parser
             if not urls:
-                if self.debug_mode: print("DEBUG: Selenium found no scans, falling back to manual file parser")
+                if self.debug_mode: print("DEBUG: Selenium found no scans, falling back to manual parser")
                 manga_url = f"{HAPPYMH_BASE}/manga/{self.manga_id}"
                 urls = get_happymh_images(chap['id'], manga_url=manga_url)
+                if self.debug_mode: print(f"DEBUG: Manual parser found {len(urls)} images")
 
             if not urls:
                 self.progress.emit(f"No images found for Ch {ch_num}")
                 return False
 
-            self.progress.emit(f"SUCCESS: Found {len(urls)} images! Starting high-speed download...")
+            # 4. Extract cookies → transfer to user's existing curl_cffi session
+            sel_ua = self._selenium_driver.execute_script("return navigator.userAgent")
+            sel_cookies = self._selenium_driver.get_cookies()
+            
+            self.progress.emit(f"Found {len(urls)} images + {len(sel_cookies)} cookies. Downloading...")
             if not out_path.exists():
                 out_path.mkdir(parents=True, exist_ok=True)
 
-            total_imgs = len(urls)
-            # Use direct connection for Bulgaria (disable proxies for Happymh downloads)
-            session = get_happymh_session(impersonate="chrome124")
+            # 5. Initialize curl_cffi session with Selenium's exact environment
+            session = requests_cf.Session(impersonate="chrome120")
+            if self.debug_mode: print(f"DEBUG: Transferring cookies to curl_cffi...")
+            for c in sel_cookies:
+                try:
+                    session.cookies.set(c['name'], c['value'], domain=c.get('domain', '.happymh.com'), path=c.get('path', '/'))
+                except: pass
 
+            total_imgs = len(urls)
             for j, url in enumerate(urls, 1):
                 if not self._is_running: break
                 
@@ -1256,45 +1415,47 @@ class DownloadWorker(QThread):
                 dest = out_path / fname
                 if not dest.exists():
                     try:
-                        # Random delay between requests
-                        import random
-                        delay = random.uniform(1.0, 3.0)
-                        time.sleep(delay)
-
-                        get_kwargs = {"stream": True, "timeout": 30}
-                        # EU-optimized headers (Sofia, Bulgaria)
-                        impersonate_targets = ["chrome124", "chrome120", "chrome131"]
-                        target = impersonate_targets[j % len(impersonate_targets)]
-                        get_kwargs["impersonate"] = target
-                        
-                        # FORCE DIRECT CONNECTION (Disable Proxies for Happymh)
-                        get_kwargs["proxies"] = None
-                        
+                        time.sleep(random.uniform(1.0, 2.0))
+                        # Match Selenium UA/headers exactly for image requests
                         headers = {
-                            "Referer": "https://m.happymh.com/",
-                            "User-Agent": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{target.replace('chrome', '')}.0.0.0 Safari/537.36" if 'chrome' in target else "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                            "Accept": "image/avif,image/webp,*/*",
+                            "Referer": chapter_url,
+                            "User-Agent": sel_ua,
+                            "Origin": "https://m.happymh.com",
+                            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
                             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                            "Accept-Encoding": "gzip, deflate, br"
+                            "Accept-Encoding": "gzip, deflate, br",
+                            "Sec-Fetch-Dest": "image",
+                            "Sec-Fetch-Mode": "no-cors",
+                            "Sec-Fetch-Site": "same-site",
+                            "Connection": "keep-alive"
                         }
-                        get_kwargs["headers"] = headers
                         
-                        r = session.get(url, **get_kwargs)
+                        r = session.get(url, headers=headers, impersonate="chrome120", timeout=30)
+                        if r.status_code == 403:
+                            headers["Referer"] = "https://m.happymh.com/"
+                            r = session.get(url, headers=headers, impersonate="chrome120", timeout=30)
+
+                        if self.debug_mode: 
+                            print(f"DEBUG: Ch {ch_num} P{j} Status: {r.status_code} {'✓ SAVED' if r.status_code == 200 else '✗ FAILED'}")
+
+                        r.raise_for_status()
+                        
+                        # Save TEMP as .avif (since HappyMH often serves AVIF)
+                        temp_dest = dest.with_suffix(".avif")
+                        with open(temp_dest, "wb") as f:
+                            f.write(r.content)
+                        
+                        # Convert AVIF -> JPG using Pillow
                         try:
-                            if r.status_code == 403:
-                                # Retry without Referer
-                                retry_headers = headers.copy()
-                                retry_headers.pop("Referer", None)
-                                get_kwargs["headers"] = retry_headers
-                                r.close()
-                                r = session.get(url, **get_kwargs)
-                            
-                            r.raise_for_status()
-                            with open(dest, "wb") as f:
-                                for chunk in r.iter_content(8192):
-                                    f.write(chunk)
+                            with Image.open(temp_dest) as img:
+                                img.convert("RGB").save(dest, "JPEG", quality=95)
+                            if self.debug_mode: print(f"DEBUG: Ch {ch_num} P{j} SAVED (AVIF->JPG)")
+                        except Exception as conv_err:
+                            if self.debug_mode: print(f"DEBUG: Conversion failed P{j}: {conv_err}. Falling back to raw.")
+                            shutil.copy2(temp_dest, dest)
                         finally:
-                            if hasattr(r, 'close'): r.close()
+                            if temp_dest.exists():
+                                os.remove(temp_dest)
                     except Exception as e:
                         self.progress.emit(f"Error page {j}: {e}")
 
@@ -1307,9 +1468,263 @@ class DownloadWorker(QThread):
             return True
         except Exception as e:
             if self.debug_mode: 
-                print(f"DEBUG: Happymh Hybrid failed: {e}")
+                print(f"DEBUG: Happymh UC Hybrid failed: {e}")
                 traceback.print_exc()
             return False
+
+    def safe_navigate_with_alert_handling(self, driver, chapter_url):
+        """Navigate to a URL while handling and dismissing alerts"""
+        try:
+            # DISMISS ANY EXISTING ALERTS FIRST
+            try:
+                alert = driver.switch_to.alert
+                print(f"DEBUG: Dismissing existing alert before navigation: {alert.text}")
+                alert.dismiss()
+                time.sleep(2)
+            except NoAlertPresentException:
+                pass
+            
+            # Human navigation via JS location.href (simulates click)
+            driver.execute_script(f"window.location.href = '{chapter_url}';")
+            time.sleep(random.uniform(5.0, 8.0))
+            
+            # POST-NAVIGATION ALERT CHECK
+            try:
+                alert = driver.switch_to.alert
+                print(f"ALERT DETECTED after navigation: {alert.text}")
+                alert.dismiss()
+                return False # Navigation failed due to alert
+            except NoAlertPresentException:
+                pass
+                
+            return True # Success
+            
+        except UnexpectedAlertPresentException:
+            print("CRITICAL: Unexpected alert during navigation")
+            try:
+                driver.switch_to.alert.dismiss()
+            except: pass
+            return False
+        except Exception as e:
+            print(f"Navigation error: {e}")
+            return False
+
+    def validate_newtoki_chapter_url(self, driver, chapter_id, domain):
+        """Check if a chapter ID leads to a valid page or a 'non-existent' error"""
+        # NewToki expects /webtoon/[ID] or /view/[ID]
+        test_url = f"https://{domain}/webtoon/{chapter_id}"
+        
+        try:
+            # Try a quick load to check for alerts
+            driver.get(test_url)
+            time.sleep(3)
+            
+            # Check for "존재하지 않는 게시판입니다" alert
+            try:
+                alert = driver.switch_to.alert
+                if "존재하지 않는" in alert.text:
+                    print(f"INVALID CHAPTER ID (Alert): {chapter_id}")
+                    alert.dismiss()
+                    return None
+                alert.dismiss()
+            except NoAlertPresentException:
+                pass
+
+            # Check page source for the error text as well
+            page_source = driver.page_source.lower()
+            if "존재하지 않는 게시판" in page_source:
+                print(f"INVALID CHAPTER ID (Source): {chapter_id}")
+                return None
+            
+            # Return the current URL (handles redirects)
+            return driver.current_url
+        except Exception as e:
+            print(f"Validation error for {chapter_id}: {e}")
+            return None
+
+    def human_navigate_and_wait(self, driver, chapter_url, ch_num):
+        """Simulate human browsing behavior to avoid anti-bot detection"""
+        self.progress.emit(f"Navigating to Ch {ch_num} (human simulation)...")
+        
+        # Human delay before ANY action
+        time.sleep(random.uniform(2.0, 4.0))
+        
+        # Simulate human browsing first
+        driver.execute_script("window.scrollTo(0, Math.random() * document.body.scrollHeight / 2);")
+        time.sleep(random.uniform(1.0, 2.0))
+        
+        # Mouse movement + resize events
+        driver.execute_script("""
+            document.dispatchEvent(new MouseEvent('mousemove', {
+                clientX: Math.random() * window.innerWidth,
+                clientY: Math.random() * window.innerHeight
+            }));
+            window.dispatchEvent(new Event('resize'));
+        """)
+        
+        # Navigate WITH REFERRER (not direct jump)
+        driver.execute_script(f"window.location.href = '{chapter_url}';")
+        
+        # HUMAN LOAD WAITING (not WebDriverWait)
+        time.sleep(random.uniform(4.0, 7.0))
+        
+        # Confirm we're NOT redirected
+        if "homepage" in driver.current_url or "newtoki" in driver.current_url and "/view/" not in driver.current_url:
+            print("\nDETECTION! Redirected to homepage. Retrying with longer delay...")
+            time.sleep(10)
+            driver.get(chapter_url)
+            time.sleep(5)
+        
+        # Final human scroll confirmation
+        driver.execute_script("window.scrollTo(0, 300);")
+        time.sleep(2)
+
+    def fast_complete_autoscroll(self, driver, scroll_step=1000, delay=0.5, max_iterations=50):
+        """Fast scroll (1000px/0.5s) to load ALL lazy images without skipping"""
+        self.progress.emit("NewToki: Auto-scrolling to load ALL images...")
+        if self.debug_mode: print("DEBUG: Fast auto-scroll loading ALL images...")
+        
+        last_height = driver.execute_script("return document.body.scrollHeight")
+        scroll_count = 0
+        
+        while scroll_count < max_iterations:
+            # Scroll 1000px down
+            driver.execute_script(f"window.scrollBy(0, {scroll_step});")
+            time.sleep(delay) # 0.5s pause = fast but loads images
+            
+            # Check if new content loaded
+            new_height = driver.execute_script("return document.body.scrollHeight")
+            if new_height > last_height:
+                if self.debug_mode: print(f"DEBUG: Scroll {scroll_count}: New content detected ({new_height}px)")
+                last_height = new_height
+            
+            scroll_count += 1
+            
+            # Stop if no new content AND scrolled enough
+            if new_height == last_height and scroll_count > 10:
+                if self.debug_mode: print(f"DEBUG: Scroll complete: {scroll_count} steps")
+                break
+        
+        # Final top->bottom scroll to catch stragglers
+        driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(1)
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(2)
+
+    def download_chapter_newtoki(self, chap, out_path, ch_num, i, total_chaps):
+        if not uc_available:
+            self.progress.emit("Error: undetected-chromedriver is not installed.")
+            return False
+
+        if not self._newtoki_driver:
+            self.progress.emit("Launching NewToki Browser (undetected-chromedriver v146)...")
+            options = uc.ChromeOptions()
+            self._newtoki_driver = uc.Chrome(options=options, version_main=146)
+        
+        driver = self._newtoki_driver
+        domain = urlparse(self.manga_id).netloc
+        
+        try:
+            # 1. URL VALIDATION FIRST (skip invalid ones)
+            valid_url = self.validate_newtoki_chapter_url(driver, chap['id'], domain)
+            if not valid_url:
+                self.progress.emit(f"SKIPPING invalid chapter: {ch_num}")
+                return False
+
+            # 2. SAFE NAVIGATION WITH ALERT HANDLING
+            if not self.safe_navigate_with_alert_handling(driver, valid_url):
+                self.progress.emit(f"NAVIGATION FAILED (ALERT): Ch {ch_num}")
+                return False
+
+            # 3. FAST AUTO-SCROLL (NEW - CRITICAL)
+            self.fast_complete_autoscroll(driver, scroll_step=1000, delay=0.5)
+            
+            # Double check for redirect or homepage
+            if domain not in driver.current_url or "webtoon" not in driver.current_url and "view" not in driver.current_url:
+                msg = (
+                    f"DETECTION/REDIRECT! Manual intervention for Ch {ch_num}\n"
+                    f"URL: {driver.current_url}\n\n"
+                    "Please navigate back to the chapter manually in the browser window.\n"
+                    "Click 'Solved' when images appear."
+                )
+                
+                while True:
+                    res = self.wait_for_captcha(msg)
+                    if res == "success":
+                        break
+                    elif res == "retry":
+                        self.human_navigate_and_wait(driver, url, ch_num)
+                        continue
+                    else:
+                        return False
+            
+            soup = BeautifulSoup(driver.page_source, "html.parser")
+            img_urls = []
+            
+            # NewToki image extraction
+            for img in soup.find_all("img"):
+                src = img.get("data-src") or img.get("data-original") or img.get("src")
+                if src and any(ext in src.lower() for ext in [".jpg", ".png", ".webp", ".jpeg"]):
+                    if "icon" not in src.lower() and "logo" not in src.lower():
+                        img_urls.append(src)
+            
+            if not img_urls:
+                self.progress.emit(f"No images found for Ch {ch_num}")
+                return False
+            
+            self.progress.emit(f"Found {len(img_urls)} images. Downloading (slow pace)...")
+            if not out_path.exists():
+                out_path.mkdir(parents=True, exist_ok=True)
+            
+            # Multi-threaded download with rate limiting
+            user_agents = [
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+            ]
+            
+            def download_one(idx, img_url):
+                if not self._is_running: return
+                time.sleep(random.uniform(4.0, 10.0)) # Even slower image pacing
+                
+                ext = ".jpg"
+                if ".png" in img_url.lower(): ext = ".png"
+                elif ".webp" in img_url.lower(): ext = ".webp"
+                
+                filename = f"{idx+1:03d}{ext}"
+                dest = out_path / filename
+                if dest.exists(): return
+                
+                headers = {"User-Agent": random.choice(user_agents), "Referer": valid_url}
+                
+                try:
+                    r = requests.get(img_url, headers=headers, timeout=30, stream=True)
+                    if r.status_code == 429:
+                        time.sleep(20)
+                        r = requests.get(img_url, headers=headers, timeout=30, stream=True)
+                    
+                    r.raise_for_status()
+                    with open(dest, "wb") as f:
+                        for chunk in r.iter_content(8192):
+                            f.write(chunk)
+                except Exception as e:
+                    print(f"Error downloading {img_url}: {e}")
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [executor.submit(download_one, j, img_url) for j, img_url in enumerate(img_urls)]
+                for j, future in enumerate(concurrent.futures.as_completed(futures)):
+                    if not self._is_running: break
+                    chapter_progress = (j + 1) / len(img_urls)
+                    total_progress = ((i + chapter_progress) / total_chaps) * 100
+                    self.percent.emit(int(total_progress))
+            
+            # Post-chapter human pause (longer)
+            time.sleep(random.uniform(10.0, 20.0))
+            return True
+        except Exception as e:
+            if self.debug_mode: print(f"DEBUG: NewToki failed: {e}")
+            return False
+        # driver.quit() removed here to reuse driver across chapters
 
     def run(self):
         total_chaps = len(self.chapters)
@@ -1361,14 +1776,20 @@ class DownloadWorker(QThread):
                     continue
 
                 elif self.site == "happymh":
-                    if self.use_selenium:
-                        chapter_url = f"{HAPPYMH_BASE}{chap['id']}" if chap['id'].startswith("/") else chap['id']
-                        if self.download_chapter_happymh(chapter_url, out_path, ch_num, i, total_chaps, chap):
-                            self._finalize_chapter(out_path, folder_name, chap)
-                        continue
-                    else:
-                        manga_url = f"{HAPPYMH_BASE}/manga/{self.manga_id}"
-                        urls = get_happymh_images(chap['id'], manga_url=manga_url)
+                    chapter_url = f"{HAPPYMH_BASE}{chap['id']}" if chap['id'].startswith("/") else chap['id']
+                    if self.download_chapter_complete(chapter_url, out_path, ch_num, i, total_chaps, chap):
+                        self._finalize_chapter(out_path, folder_name, chap)
+                    continue
+                elif self.site == "newtoki":
+                    # Inter-chapter human delay (CRITICAL for NewToki)
+                    if i > 0:
+                        delay = random.uniform(8.0, 15.0)
+                        self.progress.emit(f"Human reading delay: {delay:.1f}s...")
+                        time.sleep(delay)
+                        
+                    if self.download_chapter_newtoki(chap, out_path, ch_num, i, total_chaps):
+                        self._finalize_chapter(out_path, folder_name, chap)
+                    continue
                 else:
                     # MangaDex Download
                     urls = []
@@ -1390,14 +1811,8 @@ class DownloadWorker(QThread):
                 if not out_path.exists():
                     out_path.mkdir(parents=True, exist_ok=True)
                 
-                # Use curl_cffi for happymh images
-                session = None
-                referer_url = HAPPYMH_BASE
-                if self.site == "happymh":
-                    session = get_happymh_session(impersonate="chrome124")
-                    referer_url = f"{HAPPYMH_BASE}{chap['id']}" if chap['id'].startswith("/") else chap['id']
-                else:
-                    session = requests.Session()
+                # Use session for high-speed download
+                session = requests.Session()
 
                 total_imgs = len(urls)
                 for j, url in enumerate(urls, 1):
@@ -1429,63 +1844,21 @@ class DownloadWorker(QThread):
                                 time.sleep(delay)
 
                             get_kwargs = {"stream": True, "timeout": 30}
-                            if self.site == "happymh" and requests_cf:
-                                # Rotate impersonation and UA per request
-                                impersonate_targets = ["chrome124", "chrome120", "chrome131"]
-                                target = impersonate_targets[j % len(impersonate_targets)]
-                                get_kwargs["impersonate"] = target
-                                
-                                # EU-optimized headers (Sofia, Bulgaria) - No Bot Signals
-                                headers = {
-                                    "Referer": "https://m.happymh.com/",
-                                    "User-Agent": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{target.replace('chrome', '')}.0.0.0 Safari/537.36" if 'chrome' in target else "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                                    "Accept": "image/avif,image/webp,*/*",
-                                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                                    "Accept-Encoding": "gzip, deflate, br"
-                                }
-                                get_kwargs["headers"] = headers
-                                # Disable proxies for direct EU connection to Happymh
-                                get_kwargs["proxies"] = None
-                                
-                                if self.debug_mode:
-                                    print(f"DEBUG: Ch {ch_num} Page {j} -> {url}")
-                                    print(f"DEBUG: Using impersonate: {target}")
-                                    print(f"DEBUG: Req Headers: {headers}")
-                                
-                                # Fix: curl_cffi.requests.Session.get() returns a response that doesn't 
-                                # support 'with' context manager in older versions or specific implementations.
-                                r = session.get(url, **get_kwargs)
-                                try:
-                                    if self.debug_mode:
-                                        print(f"DEBUG: Response status: {r.status_code}")
-                                    
-                                    # Retry logic for 403: some strict CDNs prefer NO referer or different header combos
-                                    if r.status_code == 403 and self.site == "happymh":
-                                        if self.debug_mode: print("DEBUG: Got 403, retrying with NO Referer & different impersonation/proxy...")
-                                        
-                                        # Try without Referer and rotate impersonation
-                                        retry_headers = headers.copy()
-                                        retry_headers.pop("Referer", None)
-                                        get_kwargs["headers"] = retry_headers
-                                        get_kwargs["impersonate"] = "chrome110" # Different rotation for retry
-                                        
-                                        # If not using proxy, try one now. If using one, try the next in list.
-                                        next_proxy_idx = (j + 1) % len(self.proxy_list)
-                                        proxy = self.proxy_list[next_proxy_idx]
-                                        get_kwargs["proxies"] = {"http": proxy, "https": proxy}
-                                        if self.debug_mode: print(f"DEBUG: Retry using Proxy: {proxy}")
-                                        
-                                        r.close()
-                                        r = session.get(url, **get_kwargs)
-                                        if self.debug_mode: print(f"DEBUG: Retry Response status: {r.status_code}")
-
-                                    r.raise_for_status()
-                                    with open(dest, "wb") as f:
-                                        for chunk in r.iter_content(8192):
-                                            f.write(chunk)
-                                finally:
-                                    if hasattr(r, 'close'):
-                                        r.close()
+                            # Default headers for other sites (MangaDex, etc)
+                            headers = {
+                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                            }
+                            get_kwargs["headers"] = headers
+                            
+                            r = session.get(url, **get_kwargs)
+                            try:
+                                r.raise_for_status()
+                                with open(dest, "wb") as f:
+                                    for chunk in r.iter_content(8192):
+                                        f.write(chunk)
+                            finally:
+                                if hasattr(r, 'close'):
+                                    r.close()
                         except Exception as e:
                             self.progress.emit(f"Error page {j}: {e}")
                             if self.debug_mode:
@@ -1626,7 +1999,7 @@ class ModernMangaDexGUI(QMainWindow):
         self.top_bar = QHBoxLayout()
         
         self.site_combo = QComboBox()
-        self.site_combo.addItems(["MangaDex", "Baozimh", "Happymh"])
+        self.site_combo.addItems(["MangaDex", "Baozimh", "Happymh", "NewToki"])
         self.site_combo.setToolTip("Select source site")
         
         self.search_input = QLineEdit()
@@ -1824,20 +2197,9 @@ class ModernMangaDexGUI(QMainWindow):
         self.debug_chk = QCheckBox("Debug Mode")
         self.debug_chk.setToolTip("Show detailed logs in terminal for troubleshooting")
         
-        self.proxy_chk = QCheckBox("Use Proxy")
-        self.proxy_chk.setToolTip("Rotate through built-in free proxies (for Happymh 403 errors)")
-        
-        self.selenium_chk = QCheckBox("Use Selenium")
-        self.selenium_chk.setToolTip("Use headless browser for images (100% bypass, but slower)")
-        if not selenium_available:
-            self.selenium_chk.setEnabled(False)
-            self.selenium_chk.setToolTip("Selenium not installed. Run: pip install selenium webdriver-manager pillow")
-
         self.options_layout.addWidget(self.data_saver_chk)
         self.options_layout.addWidget(self.cbz_chk)
         self.options_layout.addWidget(self.debug_chk)
-        self.options_layout.addWidget(self.proxy_chk)
-        self.options_layout.addWidget(self.selenium_chk)
         self.options_layout.addStretch()
         
         self.download_btn = QPushButton("Download Selected")
@@ -1892,8 +2254,6 @@ class ModernMangaDexGUI(QMainWindow):
         if self.settings.get("data_saver") is False: self.data_saver_chk.setChecked(False)
         if self.settings.get("cbz_mode"): self.cbz_chk.setChecked(True)
         if self.settings.get("debug_mode"): self.debug_chk.setChecked(True)
-        if self.settings.get("use_proxy"): self.proxy_chk.setChecked(True)
-        if self.settings.get("use_selenium"): self.selenium_chk.setChecked(True)
 
     def log(self, msg):
         self.log_text.setText(msg)
@@ -1964,6 +2324,16 @@ class ModernMangaDexGUI(QMainWindow):
         query = self.search_input.text()
         if not query: return
         
+        # Source detection logic
+        if "newtoki" in query.lower():
+            self.site_combo.setCurrentText("NewToki")
+        elif "happymh.com" in query.lower():
+            self.site_combo.setCurrentText("Happymh")
+        elif "baozimh.com" in query.lower():
+            self.site_combo.setCurrentText("Baozimh")
+        elif "mangadex.org" in query.lower():
+            self.site_combo.setCurrentText("MangaDex")
+
         site = self.site_combo.currentText()
         if site == "MangaDex":
             site_key = "mangadex"
@@ -1971,6 +2341,8 @@ class ModernMangaDexGUI(QMainWindow):
             site_key = "baozimh"
         elif site == "Happymh":
             site_key = "happymh"
+        elif site == "NewToki":
+            site_key = "newtoki"
         else:
             QMessageBox.information(self, "Not Implemented", f"Support for {site} is coming soon!")
             return
@@ -2135,6 +2507,7 @@ class ModernMangaDexGUI(QMainWindow):
         self.chap_worker = ChapterWorker(self.selected_manga['id'], langs, site=site)
         self.chap_worker.finished.connect(self.on_chapters_fetched)
         self.chap_worker.error.connect(lambda e: self.log(f"Chapter Error: {e}"))
+        self.chap_worker.captcha_requested.connect(self.on_captcha_requested)
         self.chap_worker.start()
 
     def on_chapters_fetched(self, chapters):
@@ -2162,6 +2535,26 @@ class ModernMangaDexGUI(QMainWindow):
                                               
             item.setCheckState(0, Qt.Unchecked)
             self.chapter_tree.addTopLevelItem(item)
+
+    def on_captcha_requested(self, message):
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Manual Action Required")
+        msg_box.setText(message)
+        msg_box.setIcon(QMessageBox.Information)
+        
+        solved_btn = msg_box.addButton("Solved", QMessageBox.ActionRole)
+        retry_btn = msg_box.addButton("Retry Page Load", QMessageBox.ActionRole)
+        abort_btn = msg_box.addButton("Abort", QMessageBox.RejectRole)
+        
+        msg_box.exec()
+        
+        worker = self.sender()
+        if msg_box.clickedButton() == solved_btn:
+            worker.set_captcha_response("success")
+        elif msg_box.clickedButton() == retry_btn:
+            worker.set_captcha_response("retry")
+        else:
+            worker.set_captcha_response("abort")
 
     def open_group_filter(self):
         if not self.all_chapter_groups:
@@ -2244,13 +2637,14 @@ class ModernMangaDexGUI(QMainWindow):
             make_cbz=self.cbz_chk.isChecked(),
             site=site,
             debug_mode=self.debug_chk.isChecked(),
-            use_proxy=self.proxy_chk.isChecked(),
-            use_selenium=self.selenium_chk.isChecked()
+            use_proxy=True,
+            use_selenium=True
         )
         self.download_worker.progress.connect(self.log)
         self.download_worker.percent.connect(self.progress_bar.setValue)
         self.download_worker.finished.connect(self.on_download_finished)
         self.download_worker.error.connect(lambda e: self.log(f"Download Error: {e}"))
+        self.download_worker.captcha_requested.connect(self.on_captcha_requested)
         self.download_worker.start()
 
     def on_download_finished(self):
@@ -2274,8 +2668,6 @@ class ModernMangaDexGUI(QMainWindow):
         self.settings["data_saver"] = self.data_saver_chk.isChecked()
         self.settings["cbz_mode"] = self.cbz_chk.isChecked()
         self.settings["debug_mode"] = self.debug_chk.isChecked()
-        self.settings["use_proxy"] = self.proxy_chk.isChecked()
-        self.settings["use_selenium"] = self.selenium_chk.isChecked()
         try:
             with open(SETTINGS_FILE, "w") as f: json.dump(self.settings, f)
         except: pass
@@ -2301,6 +2693,8 @@ class ModernMangaDexGUI(QMainWindow):
         ]
         for w in workers:
             if w and w.isRunning():
+                if hasattr(w, 'stop'):
+                    w.stop()
                 w.requestInterruption()
                 w.wait(50)
 
