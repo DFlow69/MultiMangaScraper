@@ -65,52 +65,6 @@ try:
 except ImportError:
     zhconv = None
 
-def debug_environment():
-    """Reveal why dev dir works but clones fail"""
-    print("\n=== ENVIRONMENT DEBUG ===")
-    print(f"CWD: {os.getcwd()}")
-    print(f"Python path: {sys.executable}")
-    print(f"User: {os.getenv('USERNAME')}")
-    print(f"SeleniumBase cache: {os.path.expanduser('~/.seleniumbase')}")
-    
-    # Check hidden files
-    for file in ['happymh_cookies.json', '.seleniumbase', 'chrome_debug.log']:
-        if os.path.exists(file):
-            print(f"FOUND: {file}")
-    
-    # Test requests directly
-    import requests
-    try:
-        r = requests.get("https://m.happymh.com/manga/quanmintaohuangwodewupinnengshengji", timeout=10)
-        print(f"Direct HTTP: {r.status_code}")
-    except Exception as e:
-        print(f"Direct HTTP ERROR: {e}")
-    print("=========================\n")
-
-def bootstrap_environment():
-    """Make scraper work in ANY directory after git clone"""
-    static_dir = "baozimh_research"
-    
-    # Create directory structure
-    os.makedirs(static_dir, exist_ok=True)
-    
-    # Check/create happymh.txt
-    happymh_file = os.path.join(static_dir, "happymh.txt")
-    if not os.path.exists(happymh_file):
-        with open(happymh_file, 'w', encoding='utf-8') as f:
-            f.write("""## CHAPTER LIST
-<ul class="chapter-list">
-<li><a href="/mangaread/quanmintaohuangwodewupinnengshengji/6244333">第41话</a></li>
-</ul>""")
-        print("✅ Auto-generated static files for HappyMH")
-    
-    print("✅ Environment ready for any directory!")
-
-debug_environment()
-bootstrap_environment()
-
-                        
-
 class ScalableImageLabel(QLabel):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -610,46 +564,7 @@ def fetch_happymh_response(url: str, referer: Optional[str] = None):
         return None
 
 def fetch_happymh_html(url: str, referer: Optional[str] = None) -> Optional[str]:
-    # Check if user provided a research file first (Manual Override)
-    research_file = Path("baozimh_research/happymh.txt")
-    if research_file.exists():
-        try:
-            with open(research_file, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-                content = None
-                
-                # Based on user instruction:
-                # 1. <ul class="MuiList-root MuiList-padding MuiList-dense css-1ontqvh"> downwards is the chapter list (manga page)
-                # 2. Line 3 (index 2) contains the whole container of images for the chapter page (reader page)
-                
-                if "/manga/" in url:
-                    # Search entire file for the chapter list container
-                    full_content = "".join(lines)
-                    target_ul = '<ul class="MuiList-root MuiList-padding MuiList-dense css-1ontqvh"'
-                    start_idx = full_content.find(target_ul)
-                    if start_idx != -1:
-                        print(f"DEBUG: FORCED - Using CHAPTER LIST section (from specific UL) from {research_file}")
-                        return full_content[start_idx:]
-                    else:
-                        # Fallback: search for any MuiList-root
-                        start_idx = full_content.find('<ul class="MuiList-root')
-                        if start_idx != -1:
-                            print(f"DEBUG: FORCED - Using CHAPTER LIST section (from MuiList-root) from {research_file}")
-                            return full_content[start_idx:]
-                        print(f"DEBUG: FORCED - Using full content for CHAPTER LIST from {research_file}")
-                        return full_content
-                elif "/mangaread/" in url:
-                    # For reader pages, use the whole file to ensure we don't miss any containers
-                    # (User mentioned Line 3, but the file might have images in other lines too)
-                    print(f"DEBUG: FORCED - Using full content for IMAGE section from {research_file}")
-                    return "".join(lines)
-                else:
-                    print(f"DEBUG: FORCED - Using research file content for unknown URL type: {url}")
-                    return "".join(lines)
-        except Exception as e:
-            print(f"DEBUG: Error reading forced research file: {e}")
-
-    # Only if research file doesn't exist do we try network requests
+    # Network request for Cloudflare bypass
     r = fetch_happymh_response(url, referer=referer)
     if r:
         return r.text
@@ -746,6 +661,9 @@ def portable_happymh_chapter_detection(url):
         print("DEBUG: Selenium not available for portable detection")
         return []
         
+    series_slug = url.split('/')[-1]
+    print(f"DEBUG: Detecting chapters for series: {series_slug}")
+
     from seleniumbase import Driver
     # CLEAN PROFILE - no cache dependency
     driver = Driver(
@@ -777,9 +695,6 @@ def portable_happymh_chapter_detection(url):
         # Extract chapters DYNAMICALLY (no static files)
         soup = BeautifulSoup(driver.page_source, 'html.parser')
         
-        # Extract manga_id from URL
-        manga_id = url.split("/")[-1]
-        
         # Reuse existing parsing logic logic but adapted for dynamic soup
         chapters = []
         links = soup.select("a[href*='/mangaread/'], div.MuiListItemButton-root[data-href*='/mangaread/']")
@@ -790,7 +705,9 @@ def portable_happymh_chapter_detection(url):
         for link in links:
             href = link.get("href") or link.get("data-href")
             if not href or href in seen_ids: continue
-            if manga_id not in href and "/mangaread/" not in href: continue
+            
+            # CRITICAL: Match THIS SERIES ONLY to avoid mixed results
+            if series_slug not in href and "/mangaread/" not in href: continue
             
             link_text = link.get_text(" ", strip=True)
             if any(x in link_text for x in ["吐槽", "收藏", "问题反馈", "下一话", "上一话"]):
@@ -811,21 +728,26 @@ def portable_happymh_chapter_detection(url):
                 "source": "happymh"
             })
             
-        print(f"PORTABLE: Found {len(chapters)} chapters")
+        print(f"PORTABLE: Found {len(chapters)} chapters for {series_slug}")
         return chapters
     except Exception as e:
-        print(f"DEBUG: Portable HappyMH detection failed: {e}")
+        print(f"DEBUG: Portable HappyMH detection failed for {series_slug}: {e}")
         return []
     finally:
         driver.quit()
 
 def fetch_chapters_happymh(manga_id: str) -> List[dict]:
     url = f"{HAPPYMH_BASE}/manga/{manga_id}"
-    html = fetch_happymh_html(url)
     
-    if not html:
-        # Portable dynamic detection if no static file/direct response
-        return portable_happymh_chapter_detection(url)
+    # 1. DYNAMIC SeleniumBase UC (primary - works everywhere)
+    # This is the most reliable way to bypass Cloudflare and get chapters for ANY series
+    chapters = portable_happymh_chapter_detection(url)
+    if chapters:
+        return chapters
+        
+    # 2. Fallback to direct HTTP (if UC fails or not available)
+    html = fetch_happymh_html(url)
+    if not html: return []
     
     soup = BeautifulSoup(html, "html.parser")
     chapters = []
@@ -942,12 +864,6 @@ def fetch_chapters_happymh(manga_id: str) -> List[dict]:
     # Sort descending by default (usually what users want)
     chapters.sort(key=chap_sort_key, reverse=True)
     
-    if not chapters:
-        # Final fallback: if no chapters found in the provided HTML (could be template or 403 response), 
-        # try the portable SeleniumBase UC detection.
-        print(f"DEBUG: No chapters found in HTML for {manga_id}, trying portable fallback...")
-        return portable_happymh_chapter_detection(url)
-        
     return chapters
 
 def get_happymh_images(chapter_url_path: str, manga_url: Optional[str] = None) -> List[str]:
