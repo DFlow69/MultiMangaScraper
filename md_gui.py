@@ -707,6 +707,13 @@ def fetch_chapters_happymh(manga_id: str) -> List[dict]:
         # Ensure it's a chapter link for THIS manga
         # In the research file, href is like /mangaread/manga-id/chapter-id
         if manga_id not in href and "/mangaread/" not in href: continue
+        
+        # --- NEW: Filter out UI navigation buttons ---
+        # These buttons often have /mangaread/ links but are not actual chapters
+        link_text_all = link.get_text(" ", strip=True)
+        if any(x in link_text_all for x in ["下一话", "上一话", "吐槽", "收藏", "问题反馈", "返回"]):
+            continue
+            
         seen_ids.add(href)
         
         # Extraction logic for title:
@@ -725,8 +732,6 @@ def fetch_chapters_happymh(manga_id: str) -> List[dict]:
                 text = parent.get_text(" ", strip=True)
 
         # Extract chapter number: "第40话" -> "40"
-        # We want to be careful with things like dates (2025-11-27)
-        # Usually chapter names start with 第 or are just numbers
         num_match = re.search(r'(?:第|Ch|Chapter\s*)?(\d+(?:\.\d+)?)', text)
         chap_num = num_match.group(1) if num_match else "0"
         
