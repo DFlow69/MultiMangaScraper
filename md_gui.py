@@ -56,9 +56,15 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QCheckBox, QProgressBar, QMessageBox, QFileDialog,
                                QListWidget, QAbstractItemView, QFrame, QSizePolicy,
                                QHeaderView, QMenu, QDialog, QDialogButtonBox, QListWidgetItem,
-                               QComboBox)
-from PySide6.QtCore import Qt, QThread, Signal, QObject, QEvent, QSize
-from PySide6.QtGui import QPixmap, QImage, QFont, QIcon, QAction, QColor, QPalette, QActionGroup
+                               QComboBox, QScrollArea, QStackedWidget)
+from PySide6.QtCore import Qt, QThread, Signal, QObject, QEvent, QSize, Property, QRect, QEasingCurve, QPropertyAnimation
+from PySide6.QtGui import QPixmap, QImage, QFont, QIcon, QAction, QColor, QPalette, QActionGroup, QPainter, QBrush, QPen, QLinearGradient
+from PySide6.QtSvgWidgets import QSvgWidget
+from PySide6.QtSvg import QSvgRenderer
+
+import icons
+from stylesheet import STYLESHEET, SURFACE_0, SURFACE_1, SURFACE_2, SURFACE_3, BORDER, ACCENT, ACCENT_DIM, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, SUCCESS, WARNING, INFO
+from widgets import ToggleSwitch, ChipWidget, DownloadButton, StatusBadge, SegmentedControl, WelcomeWidget, LoadingPage
 
 try:
     import zhconv
@@ -1890,340 +1896,347 @@ class ModernMangaDexGUI(QMainWindow):
         self.settings = self.load_settings()
         self.library = self.load_library()
         self._old_workers = []
-        self.setWindowTitle("MangaDex Scraper (Modern Qt)")
-        self.resize(1200, 800)
+        self.search_results = []
+        self.selected_manga = None
+        self.chapters = []
+        self.all_chapter_groups = set()
         
-                                   
-        self.setStyleSheet("""
-            QMainWindow { background-color: #1e1e1e; color: #f0f0f0; }
-            QWidget { background-color: #1e1e1e; color: #f0f0f0; font-family: 'Segoe UI', sans-serif; font-size: 14px; }
-            
-            QLineEdit { 
-                padding: 10px; 
-                border: 1px solid #333; 
-                border-radius: 6px; 
-                background-color: #2d2d2d; 
-                color: #fff;
-                selection-background-color: #007acc;
-            }
-            QLineEdit:focus { border: 1px solid #007acc; }
-            
-            QPushButton { 
-                padding: 8px 16px; 
-                border: none; 
-                border-radius: 6px; 
-                background-color: #007acc; 
-                color: white; 
-                font-weight: 600; 
-            }
-            QPushButton:hover { background-color: #0098ff; }
-            QPushButton:pressed { background-color: #005c99; }
-            QPushButton:disabled { background-color: #333; color: #666; }
-            
-            QTreeWidget, QListWidget, QTextEdit { 
-                border: 1px solid #333; 
-                border-radius: 6px; 
-                background-color: #252526; 
-                alternate-background-color: #2d2d2d;
-                color: #eee;
-            }
-            QTreeWidget::item { padding: 4px; }
-            QTreeWidget::item:selected { background-color: #37373d; }
-            QHeaderView::section { 
-                background-color: #333; 
-                padding: 6px; 
-                border: none; 
-                font-weight: bold; 
-                color: #ccc;
-            }
-            
-            QProgressBar { 
-                border: 1px solid #333; 
-                border-radius: 6px; 
-                text-align: center; 
-                background-color: #252526;
-            }
-            QProgressBar::chunk { background-color: #007acc; border-radius: 5px; }
-            
-            QSplitter::handle { background-color: #333; }
-            QLabel { color: #ddd; }
-            QCheckBox { spacing: 8px; color: #ddd; }
-            QCheckBox::indicator { width: 18px; height: 18px; }
-        """)
+        self.setWindowTitle("MultiMangaScraper")
+        self.resize(1200, 850)
+        
+        # Apply Master Stylesheet
+        self.setStyleSheet(STYLESHEET)
 
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
-        self.layout = QVBoxLayout(self.central_widget)
-        self.layout.setContentsMargins(15, 15, 15, 15)
-        self.layout.setSpacing(15)
+        self.main_layout = QVBoxLayout(self.central_widget)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
 
-                                
-        self.top_bar = QHBoxLayout()
-        
+        # ━━━ 1. TOP BAR ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        self.top_bar = QFrame()
+        self.top_bar.setObjectName("TopBar")
+        self.top_bar_layout = QHBoxLayout(self.top_bar)
+        self.top_bar_layout.setContentsMargins(16, 0, 16, 0)
+        self.top_bar_layout.setSpacing(12)
+
+        # Source Dropdown
         self.site_combo = QComboBox()
         self.site_combo.addItems(["MangaDex", "Baozimh", "Happymh", "NewToki"])
         self.site_combo.setToolTip("Select source site")
         
+        # Search Input
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Search manga by title...")
+        self.search_input.setPlaceholderText("Search manga titles...")
         self.search_input.returnPressed.connect(self.start_search)
         
+        # Romaji Toggle
+        self.romaji_container = QHBoxLayout()
+        self.romaji_container.setSpacing(8)
+        self.romaji_label = QLabel("Romaji")
+        self.romaji_label.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 12px;")
+        self.romaji_toggle = ToggleSwitch()
+        self.romaji_toggle.setChecked(self.settings.get("romaji_titles", False))
+        self.romaji_toggle.clicked.connect(self.on_romaji_toggled)
+        self.romaji_container.addWidget(self.romaji_label)
+        self.romaji_container.addWidget(self.romaji_toggle)
+
+        # Search Button
         self.search_btn = QPushButton("Search")
-        self.search_btn.setIcon(QIcon.fromTheme("system-search"))
+        self.search_btn.setObjectName("AccentButton")
+        self.search_btn.setFixedWidth(100)
         self.search_btn.clicked.connect(self.start_search)
         
-        self.romaji_chk = QCheckBox("Show Romaji Titles")
-        self.romaji_chk.setToolTip("Toggle between English and Romaji titles")
-        self.romaji_chk.stateChanged.connect(self.refresh_titles)
-        
-        self.top_bar.addWidget(self.site_combo)
-        self.top_bar.addWidget(self.search_input, stretch=1)
-        self.top_bar.addWidget(self.romaji_chk)
-        self.top_bar.addWidget(self.search_btn)
-        
+        # Library Button
         self.lib_btn = QPushButton("Library")
-        self.lib_btn.setIcon(QIcon.fromTheme("system-file-manager"))
+        self.lib_btn.setObjectName("LibraryButton")
+        self.lib_btn.setFixedWidth(100)
         self.lib_btn.clicked.connect(self.open_library)
-        self.top_bar.addWidget(self.lib_btn)
-        
-        self.layout.addLayout(self.top_bar)
 
-                                
+        self.top_bar_layout.addWidget(self.site_combo)
+        self.top_bar_layout.addWidget(self.search_input, stretch=1)
+        self.top_bar_layout.addSpacing(10)
+        self.top_bar_layout.addLayout(self.romaji_container)
+        self.top_bar_layout.addSpacing(10)
+        self.top_bar_layout.addWidget(self.search_btn)
+        self.top_bar_layout.addWidget(self.lib_btn)
+
+        self.main_layout.addWidget(self.top_bar) # ADDED TOP BAR
+
+        self.log_text = QLabel("")
+        self.log_text.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        self.log_text.setVisible(False)
+        self.main_layout.addWidget(self.log_text)
+
+        # ━━━ SPLITTER ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         self.splitter = QSplitter(Qt.Horizontal)
-        self.layout.addWidget(self.splitter)
+        self.main_layout.addWidget(self.splitter)
 
-                              
-        self.left_panel = QWidget()
+        # ━━━ 2. LEFT PANEL — SEARCH RESULTS ━━━━━━━━━━━━━━━━━━━━━━━━━━
+        self.left_panel = QFrame()
+        self.left_panel.setObjectName("SidePanel")
         self.left_layout = QVBoxLayout(self.left_panel)
-        self.left_layout.setContentsMargins(0, 0, 0, 0)
+        self.left_layout.setContentsMargins(16, 16, 16, 16)
         
-                                                            
         self.results_header = QHBoxLayout()
-        self.results_label = QLabel("Search Results")
-        self.results_label.setStyleSheet("font-weight: bold; font-size: 16px;")
+        self.results_title = QLabel("RESULTS")
+        self.results_title.setObjectName("SectionHeader")
         
-        self.loaded_label = QLabel("")
-        self.loaded_label.setStyleSheet("color: #aaa; font-style: italic;")
-
-        self.results_header.addWidget(self.results_label)
+        self.count_badge = QLabel("0")
+        self.count_badge.setObjectName("Badge")
+        self.count_badge.setStyleSheet(f"background-color: {ACCENT_DIM}; color: {ACCENT};")
+        
+        self.results_header.addWidget(self.results_title)
         self.results_header.addStretch()
-        self.results_header.addWidget(self.loaded_label)
+        self.results_header.addWidget(self.count_badge)
         
         self.left_layout.addLayout(self.results_header)
         
+        self.loaded_label = QLabel("0 chapters loaded")
+        self.loaded_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        self.left_layout.addWidget(self.loaded_label)
+        
         self.results_tree = QTreeWidget()
-        self.results_tree.setHeaderLabels(["Title", "Status"])
-        self.results_tree.setColumnWidth(0, 300)
-        self.results_tree.setAlternatingRowColors(True)
+        self.results_tree.setHeaderHidden(True)
+        self.results_tree.setIndentation(0)
+        self.results_tree.setColumnCount(1) # Sidebar only needs 1 column for clean look
         self.results_tree.itemSelectionChanged.connect(self.on_manga_selected)
         self.left_layout.addWidget(self.results_tree)
         
         self.splitter.addWidget(self.left_panel)
 
-                                   
-        self.right_widget = QWidget()
-        self.right_layout = QVBoxLayout(self.right_widget)
+        # ━━━ 3. RIGHT PANEL — STACKED WIDGET ━━━━━━━━━━━━━━━━━━━━━━━━━
+        self.right_stack = QStackedWidget()
+        self.right_stack.setObjectName("DetailPanel")
+        
+        # Page 1: Welcome
+        self.welcome_page = WelcomeWidget()
+        self.right_stack.addWidget(self.welcome_page)
+        
+        # Page 2: Loading
+        self.loading_page = LoadingPage()
+        self.right_stack.addWidget(self.loading_page)
+        
+        # Page 3: Manga Detail View
+        self.right_container = QWidget()
+        self.right_layout = QVBoxLayout(self.right_container)
         self.right_layout.setContentsMargins(0, 0, 0, 0)
-        self.splitter.addWidget(self.right_widget)
+        self.right_layout.setSpacing(0)
         
-                                                                           
-                                                         
-                                 
-        self.splitter.setSizes([250, 950])
-        self.splitter.setStretchFactor(0, 0)
-        self.splitter.setStretchFactor(1, 1)
+        # Vertical Splitter for Metadata vs Chapters
+        self.detail_splitter = QSplitter(Qt.Vertical)
+        self.detail_splitter.setHandleWidth(1)
+        self.detail_splitter.setStyleSheet(f"QSplitter::handle {{ background-color: {BORDER}; }}")
 
-                                                   
-        self.info_frame = QFrame()
-        self.info_frame.setStyleSheet("QFrame { background-color: #252526; border-radius: 8px; padding: 10px; }")
-                                                        
-        self.info_layout = QHBoxLayout(self.info_frame)
+        # ━━━ 3. MANGA DETAIL AREA (Scrollable) ━━━━━━━━━━━━━━━━━━━━━━━
+        self.detail_scroll = QScrollArea()
+        self.detail_scroll.setWidgetResizable(True)
+        self.detail_scroll.setFrameShape(QFrame.NoFrame)
+        self.detail_widget = QWidget()
+        self.detail_layout = QVBoxLayout(self.detail_widget)
+        self.detail_layout.setContentsMargins(24, 24, 24, 24)
+        self.detail_layout.setSpacing(24)
         
+        self.info_header = QHBoxLayout()
+        self.info_header.setSpacing(24)
+        
+        # Cover
         self.cover_label = ScalableImageLabel()
-        self.cover_label.setText("No Cover")
-        self.cover_label.setMaximumWidth(450)                    
-        self.cover_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)                                                           
-
-                                                
-        self.details_layout = QVBoxLayout()
-        self.details_layout.setSpacing(5)                  
-        self.details_layout.setContentsMargins(0, 0, 0, 0)
+        self.cover_label.setFixedSize(160, 228)
+        self.info_header.addWidget(self.cover_label)
         
-        self.title_label = QLabel("Select a manga")
-        self.title_label.setStyleSheet("font-size: 20px; font-weight: bold; color: #fff;")
+        # Info Column
+        self.info_col = QVBoxLayout()
+        self.info_col.setSpacing(12)
+        
+        self.title_row = QHBoxLayout()
+        self.title_row.setSpacing(10)
+        self.title_label = QLabel("Select a manga to start")
+        self.title_label.setObjectName("MangaTitle")
         self.title_label.setWordWrap(True)
-        self.title_label.setMaximumHeight(60)                     
+        self.title_label.setStyleSheet("background-color: white; color: black; border-radius: 4px; padding: 4px 12px;")
+        
+        self.status_badge = StatusBadge("Unknown", "info")
+        
+        self.title_row.addWidget(self.title_label, stretch=1)
+        self.title_row.addWidget(self.status_badge)
+        self.info_col.addLayout(self.title_row)
         
         self.desc_text = QTextEdit()
         self.desc_text.setReadOnly(True)
-        self.desc_text.setPlaceholderText("Description...")
-        self.desc_text.setStyleSheet("border: none; background-color: transparent;")
-        self.desc_text.setMaximumHeight(100)                           
+        self.desc_text.setFrameShape(QFrame.NoFrame)
+        self.desc_text.setStyleSheet(f"color: {TEXT_SECONDARY}; line-height: 1.6; background: transparent;")
+        self.desc_text.setMaximumHeight(120)
+        self.info_col.addWidget(self.desc_text)
         
-        self.lang_label = QLabel("Available Languages:")
-        self.lang_label.setStyleSheet("color: #aaa; font-size: 12px; margin-top: 5px;")
+        # Languages
+        self.lang_section = QVBoxLayout()
+        self.lang_label = QLabel("LANGUAGES")
+        self.lang_label.setObjectName("SectionHeader")
+        self.lang_label.setStyleSheet("font-size: 11px;")
         
-                                 
-        self.lang_list = QListWidget()
-        self.lang_list.setSelectionMode(QAbstractItemView.MultiSelection)
-        self.lang_list.setFlow(QListWidget.LeftToRight)                  
-        self.lang_list.setWrapping(True)                    
-        self.lang_list.setResizeMode(QListWidget.Adjust)                   
-        self.lang_list.setSpacing(4)
-        self.lang_list.setMaximumHeight(80)                                               
-        self.lang_list.setStyleSheet("""
-            QListWidget { background-color: transparent; border: none; }
-            QListWidget::item { 
-                background-color: #333; 
-                border-radius: 4px; 
-                padding: 4px 8px; 
-                color: #ddd;
-                margin: 2px;
-            }
-            QListWidget::item:selected { 
-                background-color: #007acc; 
-                color: white;
-            }
-            QListWidget::item:hover {
-                background-color: #444;
-            }
-        """)
-        self.lang_list.itemSelectionChanged.connect(self.on_lang_changed)
+        self.lang_flow = QHBoxLayout()
+        self.lang_flow.setSpacing(6)
+        self.lang_list = QListWidget() 
+        self.lang_list.hide()
+        
+        self.lang_section.addWidget(self.lang_label)
+        self.lang_section.addLayout(self.lang_flow)
+        self.info_col.addLayout(self.lang_section)
+        
+        # Add to Library Button
+        self.add_lib_btn = QPushButton("Add to Library")
+        self.add_lib_btn.setObjectName("AccentButton")
+        self.add_lib_btn.setFixedHeight(40)
+        self.add_lib_btn.setFixedWidth(160)
+        self.add_lib_btn.clicked.connect(self.add_to_library)
+        self.info_col.addWidget(self.add_lib_btn)
+        
+        self.info_header.addLayout(self.info_col, stretch=1)
+        self.detail_layout.addLayout(self.info_header)
+        
+        self.detail_scroll.setWidget(self.detail_widget)
+        self.detail_splitter.addWidget(self.detail_scroll)
 
-        self.details_layout.addWidget(self.title_label)
-        self.details_layout.addWidget(self.desc_text)
-        self.details_layout.addWidget(self.lang_label)
-        self.details_layout.addWidget(self.lang_list)
-        
-        self.btn_add_lib = QPushButton("Add to Library")
-        self.btn_add_lib.clicked.connect(self.add_current_to_library)
-        self.details_layout.addWidget(self.btn_add_lib)
+        # ━━━ 4. CHAPTERS AREA ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        self.chapters_container = QWidget()
+        self.chapters_layout = QVBoxLayout(self.chapters_container)
+        self.chapters_layout.setContentsMargins(0, 0, 0, 0)
+        self.chapters_layout.setSpacing(0)
 
-        self.details_layout.addStretch()                                   
+        # CHAPTER CONTROLS BAR
+        self.controls_bar = QFrame()
+        self.controls_bar.setObjectName("ControlsBar")
+        self.controls_bar.setFixedHeight(48)
+        self.controls_layout = QHBoxLayout(self.controls_bar)
+        self.controls_layout.setContentsMargins(16, 0, 16, 0)
         
-        self.info_layout.addWidget(self.cover_label)                                                   
-        self.info_layout.addLayout(self.details_layout, stretch=1)
+        self.chapter_actions = SegmentedControl()
+        self.sel_all_btn = self.chapter_actions.addButton("Select All")
+        self.sel_none_btn = self.chapter_actions.addButton("Deselect All")
+        self.invert_btn = self.chapter_actions.addButton("Invert")
         
-                                                            
-        self.right_layout.addWidget(self.info_frame, stretch=0)
-
-                          
-        self.chap_ctrl_layout = QHBoxLayout()
-        self.btn_select_all = QPushButton("Select All")
-        self.btn_select_all.clicked.connect(self.select_all_chapters)
-        self.btn_deselect_all = QPushButton("Deselect All")
-        self.btn_deselect_all.clicked.connect(self.deselect_all_chapters)
-        self.btn_invert = QPushButton("Invert")
-        self.btn_invert.clicked.connect(self.invert_chapters)
+        self.sel_all_btn.clicked.connect(self.select_all_chapters)
+        self.sel_none_btn.clicked.connect(self.deselect_all_chapters)
+        self.invert_btn.clicked.connect(self.invert_chapters)
         
-        self.btn_filter_group = QPushButton("Filter Groups")
-        self.btn_filter_group.clicked.connect(self.open_group_filter)
-
-                         
+        self.filter_groups_btn = QPushButton("Filter Groups")
+        self.filter_groups_btn.setFixedHeight(32)
+        self.filter_groups_btn.clicked.connect(self.show_group_filter)
+        
+        # Range Inputs
+        self.range_layout = QHBoxLayout()
+        self.range_label = QLabel("RANGE:")
+        self.range_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
         self.range_start = QLineEdit()
-        self.range_start.setPlaceholderText("Start")
-        self.range_start.setFixedWidth(50)
+        self.range_start.setPlaceholderText("—")
+        self.range_start.setFixedSize(64, 32)
         self.range_end = QLineEdit()
-        self.range_end.setPlaceholderText("End")
-        self.range_end.setFixedWidth(50)
-        self.btn_range = QPushButton("Select Range")
-        self.btn_range.clicked.connect(self.select_chapter_range)
+        self.range_end.setPlaceholderText("—")
+        self.range_end.setFixedSize(64, 32)
+        self.range_btn = QPushButton("Select")
+        self.range_btn.setFixedHeight(32)
+        self.range_btn.setStyleSheet(f"color: {ACCENT};")
+        self.range_btn.clicked.connect(self.select_range)
         
-                                               
-        self.chap_ctrl_layout.addWidget(self.btn_select_all)
-        self.chap_ctrl_layout.addWidget(self.btn_deselect_all)
-        self.chap_ctrl_layout.addWidget(self.btn_invert)
-        self.chap_ctrl_layout.addWidget(self.btn_filter_group)
+        self.range_layout.addWidget(self.range_label)
+        self.range_layout.addWidget(self.range_start)
+        self.range_layout.addWidget(QLabel("-"))
+        self.range_layout.addWidget(self.range_end)
+        self.range_layout.addWidget(self.range_btn)
         
-        line = QFrame()
-        line.setFrameShape(QFrame.VLine)
-        line.setFrameShadow(QFrame.Sunken)
-        self.chap_ctrl_layout.addWidget(line)
+        self.controls_layout.addWidget(self.chapter_actions)
+        self.controls_layout.addSpacing(16)
+        self.controls_layout.addWidget(self.filter_groups_btn)
+        self.controls_layout.addStretch()
+        self.controls_layout.addLayout(self.range_layout)
         
-        self.chap_ctrl_layout.addWidget(QLabel("Range:"))
-        self.chap_ctrl_layout.addWidget(self.range_start)
-        self.chap_ctrl_layout.addWidget(QLabel("-"))
-        self.chap_ctrl_layout.addWidget(self.range_end)
-        self.chap_ctrl_layout.addWidget(self.btn_range)
-        self.chap_ctrl_layout.addStretch()
+        self.chapters_layout.addWidget(self.controls_bar)
 
-        # Options Layout (Checkboxes)
-        self.options_layout = QHBoxLayout()
+        # OPTIONS BAR
+        self.options_bar = QFrame()
+        self.options_bar.setObjectName("OptionsBar")
+        self.options_bar.setFixedHeight(40)
+        self.options_layout = QHBoxLayout(self.options_bar)
+        self.options_layout.setContentsMargins(16, 0, 16, 0)
+        
+        self.opt_label = QLabel("DOWNLOAD OPTIONS")
+        self.opt_label.setObjectName("SectionHeader")
+        self.opt_label.setStyleSheet("font-size: 10px;")
+        
         self.data_saver_chk = QCheckBox("Data Saver")
-        self.data_saver_chk.setToolTip("Use compressed images (saves bandwidth)")
-        self.data_saver_chk.setChecked(True)
-        
         self.cbz_chk = QCheckBox("Save as CBZ")
-        self.cbz_chk.setToolTip("Save chapters as .cbz files instead of folders")
-        
         self.debug_chk = QCheckBox("Debug Mode")
-        self.debug_chk.setToolTip("Show detailed logs in terminal for troubleshooting")
         
+        self.options_layout.addWidget(self.opt_label)
+        self.options_layout.addSpacing(12)
         self.options_layout.addWidget(self.data_saver_chk)
         self.options_layout.addWidget(self.cbz_chk)
         self.options_layout.addWidget(self.debug_chk)
         self.options_layout.addStretch()
         
-        self.download_btn = QPushButton("Download Selected")
-        self.download_btn.setStyleSheet("background-color: #28a745; min-width: 150px; padding: 10px;")
+        self.chapters_layout.addWidget(self.options_bar)
+
+        # DOWNLOAD BUTTON
+        self.download_btn = DownloadButton("Download Selected (0 chapters)")
         self.download_btn.clicked.connect(self.start_download)
         
-        self.right_layout.addLayout(self.chap_ctrl_layout)
-        self.right_layout.addLayout(self.options_layout)
-        self.right_layout.addWidget(self.download_btn)
-        
+        self.dl_container = QFrame()
+        self.dl_container.setStyleSheet(f"background-color: {SURFACE_1}; border-bottom: 1px solid {BORDER};")
+        self.dl_layout = QHBoxLayout(self.dl_container)
+        self.dl_layout.setContentsMargins(16, 12, 16, 12)
+        self.dl_layout.addWidget(self.download_btn)
+        self.chapters_layout.addWidget(self.dl_container)
+
+        # CHAPTER TABLE
         self.chapter_tree = QTreeWidget()
-        self.chapter_tree.setHeaderLabels(["Ch", "Title", "Lang", "Group", "Release Date"])
-        self.chapter_tree.setAlternatingRowColors(True)
-        self.chapter_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
-                                      
+        self.chapter_tree.setColumnCount(5)
+        self.chapter_tree.setHeaderLabels(["#", "Title", "Lang", "Group", "Date"])
         header = self.chapter_tree.header()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)     
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)       
-        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)               
-        header.setSectionResizeMode(1, QHeaderView.Stretch)                             
-        header.setSectionResizeMode(3, QHeaderView.Interactive)                           
-
-        self.right_layout.addWidget(self.chapter_tree)
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.Fixed)
+        header.setSectionResizeMode(3, QHeaderView.Fixed)
+        header.setSectionResizeMode(4, QHeaderView.Fixed)
+        self.chapter_tree.setColumnWidth(0, 100)
+        self.chapter_tree.setColumnWidth(2, 56)
+        self.chapter_tree.setColumnWidth(3, 140)
+        self.chapter_tree.setColumnWidth(4, 110)
+        self.chapter_tree.setAlternatingRowColors(True)
+        self.chapter_tree.itemChanged.connect(self.update_download_count)
         
-        # Ensure bottom controls don't get pushed out
-        self.right_layout.setStretch(0, 0) # info_frame
-        self.right_layout.setStretch(1, 0) # chap_ctrl_layout
-        self.right_layout.setStretch(2, 0) # options_layout
-        self.right_layout.setStretch(3, 0) # download_btn
-        self.right_layout.setStretch(4, 1) # chapter_tree (takes remaining space)
-
-                                                           
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        self.progress_bar.setFixedHeight(10)                    
-        self.layout.addWidget(self.progress_bar)
+        self.chapters_layout.addWidget(self.chapter_tree)
+        self.detail_splitter.addWidget(self.chapters_container)
         
-        self.log_text = QLabel("Ready")
-        self.log_text.setVisible(False)                                             
-        self.layout.addWidget(self.log_text)
+        self.detail_splitter.setSizes([350, 500])
+        self.right_layout.addWidget(self.detail_splitter)
 
-               
-        self.search_results = []
-        self.selected_manga = None
-        self.chapters = []
-        self.download_worker = None
-        self.current_search_query = ""
-        self.all_chapter_groups = set()
+        self.right_stack.addWidget(self.right_container)
+        self.splitter.addWidget(self.right_stack)
 
-                          
-        if self.settings.get("romaji_titles"): self.romaji_chk.setChecked(True)
-        if self.settings.get("data_saver") is False: self.data_saver_chk.setChecked(False)
+        # Initialize UI state
+        self.splitter.setSizes([280, 920])
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.update_download_count()
+        self.load_settings_to_ui()
+
+    def on_romaji_toggled(self, checked):
+        self.refresh_titles()
+
+    def load_settings_to_ui(self):
+        if self.settings.get("data_saver"): self.data_saver_chk.setChecked(True)
         if self.settings.get("cbz_mode"): self.cbz_chk.setChecked(True)
         if self.settings.get("debug_mode"): self.debug_chk.setChecked(True)
+        # Toggle switch sync
+        self.romaji_toggle.setChecked(self.settings.get("romaji_titles", False))
 
     def log(self, msg):
         self.log_text.setText(msg)
         print(msg)
 
     def get_preferred_title(self, manga_data):
-                                           
-        use_romaji = self.romaji_chk.isChecked()
+        use_romaji = self.romaji_toggle.isChecked()
         attrs = manga_data.get('attributes', {})
         titles = attrs.get('title', {})
         alt_titles = attrs.get('altTitles', [])
@@ -2268,14 +2281,14 @@ class ModernMangaDexGUI(QMainWindow):
         self.results_tree.clear()
         for r in self.search_results:
             display_title = self.get_preferred_title(r)
-            item = QTreeWidgetItem([display_title, r['status'] or "N/A"])
+            item = QTreeWidgetItem([display_title])
             item.setData(0, Qt.UserRole, r['id'])           
             self.results_tree.addTopLevelItem(item)
             
             if selected_id and r['id'] == selected_id:
                 item.setSelected(True)
                                               
-                self.title_label.setText(f"{display_title} ({r['status']})")
+                self.title_label.setText(f"{display_title} ({r['status'] or 'N/A'})")
 
     def cleanup_worker(self, worker):
         if worker in self._old_workers:
@@ -2329,6 +2342,9 @@ class ModernMangaDexGUI(QMainWindow):
         self.search_btn.setEnabled(False)
         self.current_search_query = query
         
+        # Switch to loading page
+        self.right_stack.setCurrentIndex(1)
+        
         self.worker = SearchWorker(query, site=site_key)
         self.worker.finished.connect(self.on_search_finished)
         self.worker.error.connect(lambda e: self.log(f"Search Error: {e}"))
@@ -2338,25 +2354,32 @@ class ModernMangaDexGUI(QMainWindow):
         self.search_btn.setEnabled(True)
         self.search_results = results
         self.log(f"Found {len(results)} results.")
-        self.results_label.setText(f"Search Results ({len(results)})")
+        self.results_title.setText("RESULTS")
+        self.count_badge.setText(str(len(results)))
         self.refresh_titles()
+        
+        if results:
+            self.results_tree.setCurrentItem(self.results_tree.topLevelItem(0))
+        else:
+            # If no results, go back to welcome page
+            self.right_stack.setCurrentIndex(0)
+            self.results_tree.clear()
+            QMessageBox.information(self, "No Results", f"No results found for '{self.current_search_query}' on {self.site_combo.currentText()}.")
 
     def on_manga_selected(self):
         selected_items = self.results_tree.selectedItems()
         if not selected_items: return
-        
-                                               
+
+        # Cancel any ongoing cover loads or chapter fetches
         if hasattr(self, 'img_loader') and self.img_loader and self.img_loader.isRunning():
             self.img_loader.requestInterruption()
             try: self.img_loader.loaded.disconnect()
             except: pass
-            
             old_loader = self.img_loader
             self._old_workers.append(old_loader)
             old_loader.finished.connect(lambda: self.cleanup_worker(old_loader))
             self.img_loader = None
             
-                                                  
         if hasattr(self, 'chap_worker') and self.chap_worker and self.chap_worker.isRunning():
             self.chap_worker.requestInterruption()
             try: self.chap_worker.finished.disconnect()
@@ -2369,19 +2392,33 @@ class ModernMangaDexGUI(QMainWindow):
             old_chap.finished.connect(lambda: self.cleanup_worker(old_chap))
             self.chap_worker = None
 
-                                
         idx = self.results_tree.indexOfTopLevelItem(selected_items[0])
         if idx < 0 or idx >= len(self.search_results): return
         
         self.selected_manga = self.search_results[idx]
         display_title = self.get_preferred_title(self.selected_manga)
         
-        self.title_label.setText(f"{display_title} ({self.selected_manga['status']})")
-        self.desc_text.setText(self.selected_manga['description'])
+        # Switch to details page
+        self.right_stack.setCurrentIndex(2)
         
-               
+        # Update UI
+        self.title_label.setText(display_title)
+        self.title_label.setStyleSheet("background-color: white; color: black; border-radius: 4px; padding: 4px 12px;")
+        
+        self.status_badge.setText(self.selected_manga.get('status', 'Unknown').upper())
+        # Apply color based on status
+        status_colors = {
+            "ongoing": ("#7a5a10", "#f39c12"),
+            "completed": ("#1e5a2d", "#2ecc71"),
+            "hiatus": ("#1a4a6e", "#3498db")
+        }
+        bg, fg = status_colors.get(self.selected_manga.get('status', '').lower(), ("#252535", "#8a8aa0"))
+        self.status_badge.setStyleSheet(f"background-color: {bg}; color: {fg}; border-radius: 11px; font-size: 11px; font-weight: bold; padding: 2px 10px;")
+        
+        self.desc_text.setText(self.selected_manga.get('description', 'No description available.'))
+        
+        # Cover
         self.cover_label.setText("Loading...")
-                                                               
         self.cover_label.setPixmap(QPixmap()) 
         
         if self.selected_manga.get('cover_url'):
@@ -2397,58 +2434,81 @@ class ModernMangaDexGUI(QMainWindow):
         else:
             self.cover_label.setText("No Cover")
 
-                   
+        # Languages Chips
         self.lang_list.blockSignals(True)                                            
         self.lang_list.clear()
+        
+        # Clear old chips
+        while self.lang_flow.count():
+            item = self.lang_flow.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+
         langs = sorted([l for l in self.selected_manga.get("available_languages", []) if l])
         if not langs:
-            self.lang_list.addItem("No specific langs listed")
+            lbl = QLabel("No specific languages listed")
+            lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px;")
+            self.lang_flow.addWidget(lbl)
         else:
-            self.lang_list.addItems(langs)
+            for l in langs:
+                self.lang_list.addItem(l)
+                chip = ChipWidget(l)
+                chip.toggled.connect(self.on_chip_toggled)
+                self.lang_flow.addWidget(chip)
+        
         self.lang_list.blockSignals(False)
         
-                        
+        # Add Stretch to push chips to the left
+        self.lang_flow.addStretch()
+        
+        # Clear chapters
         self.chapter_tree.clear()
         self.chapters = []
         self.all_chapter_groups = set()
-        self.loaded_label.setText("")                               
+        self.loaded_label.setText("0 chapters loaded")                               
         
-                                
         if not langs:
             self.fetch_chapters()
 
-    def select_chapter_range(self):
+    def on_chip_toggled(self, checked):
+        chip = self.sender()
+        lang = chip.text()
+        for i in range(self.lang_list.count()):
+            item = self.lang_list.item(i)
+            if item.text() == lang:
+                item.setSelected(checked)
+                break
+        
+        selected_langs = [item.text() for item in self.lang_list.selectedItems()]
+        if "No specific langs listed" in selected_langs or not selected_langs: 
+            selected_langs = None
+        self.fetch_chapters(selected_langs)
+
+    def update_download_count(self):
+        count = 0
+        for i in range(self.chapter_tree.topLevelItemCount()):
+            if self.chapter_tree.topLevelItem(i).checkState(0) == Qt.Checked:
+                count += 1
+        self.download_btn.setText(f"Download Selected ({count} chapters)")
+        self.download_btn.setEnabled(count > 0)
+
+    def select_range(self):
         start_str = self.range_start.text().strip()
         end_str = self.range_end.text().strip()
-        
-        if not start_str or not end_str:
-            return
-            
+        if not start_str or not end_str: return
         try:
-            start_num = float(start_str)
-            end_num = float(end_str)
-            
-                                  
-            if start_num > end_num:
-                start_num, end_num = end_num, start_num
-                
+            start_num, end_num = float(start_str), float(end_str)
+            if start_num > end_num: start_num, end_num = end_num, start_num
             count = 0
             for i in range(self.chapter_tree.topLevelItemCount()):
                 item = self.chapter_tree.topLevelItem(i)
-                                                           
                 try:
                     chap_val = float(item.text(0))
                     if start_num <= chap_val <= end_num:
                         item.setCheckState(0, Qt.Checked)
                         count += 1
-                except ValueError:
-                                                                           
-                    pass
-            
+                except: pass
             self.log(f"Selected {count} chapters in range {start_num}-{end_num}")
-            
-        except ValueError:
-            QMessageBox.warning(self, "Invalid Range", "Please enter valid numbers for the range.")
+        except: pass
 
 
     def set_cover_image(self, image):
@@ -2475,7 +2535,7 @@ class ModernMangaDexGUI(QMainWindow):
     def on_chapters_fetched(self, chapters):
         self.chapters = chapters
         self.log(f"Loaded {len(chapters)} chapters.")
-        self.loaded_label.setText(f"Loaded {len(chapters)} chapters")
+        self.loaded_label.setText(f"{len(chapters)} chapters loaded")
         self.all_chapter_groups = set()
         
         for c in chapters:
@@ -2486,15 +2546,19 @@ class ModernMangaDexGUI(QMainWindow):
                 for g in groups:
                     self.all_chapter_groups.add(g)
 
+            # Use raw chapter string or fallback
+            chap_num = str(c.get('chapter', ''))
+            if not chap_num: chap_num = "0"
+            
             item = QTreeWidgetItem([
-                str(c.get('chapter') or "Oneshot"),
+                chap_num,
                 c.get('title') or "",
                 c.get('language', '??'),
                 ", ".join(groups) if groups else "No Group",
                 format_date(c.get('publishAt'))
             ])
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setData(0, Qt.UserRole, c)                          
-                                              
             item.setCheckState(0, Qt.Unchecked)
             self.chapter_tree.addTopLevelItem(item)
 
@@ -2518,7 +2582,7 @@ class ModernMangaDexGUI(QMainWindow):
         else:
             worker.set_captcha_response("abort")
 
-    def open_group_filter(self):
+    def show_group_filter(self):
         if not self.all_chapter_groups:
             QMessageBox.information(self, "No Groups", "No groups found in current chapter list.")
             return
@@ -2579,16 +2643,13 @@ class ModernMangaDexGUI(QMainWindow):
         if not base_dir: return
         self.settings["last_dir"] = base_dir
         
-                                      
         display_title = self.get_preferred_title(self.selected_manga)
         safe_title = "".join(c for c in display_title if c.isalnum() or c in (' ', '-', '_')).strip()
         manga_dir = Path(base_dir) / safe_title
         manga_dir.mkdir(parents=True, exist_ok=True)
 
         self.download_btn.setEnabled(False)
-        self.progress_bar.setVisible(True)
-        self.log_text.setVisible(True)                           
-        self.progress_bar.setValue(0)
+        self.download_btn.setProgress(0, 100)
         
         site = self.selected_manga.get("source", "mangadex")
         self.download_worker = DownloadWorker(
@@ -2603,7 +2664,7 @@ class ModernMangaDexGUI(QMainWindow):
             use_selenium=True
         )
         self.download_worker.progress.connect(self.log)
-        self.download_worker.percent.connect(self.progress_bar.setValue)
+        self.download_worker.percent.connect(lambda p: self.download_btn.setProgress(p, 100))
         self.download_worker.finished.connect(self.on_download_finished)
         self.download_worker.error.connect(lambda e: self.log(f"Download Error: {e}"))
         self.download_worker.captcha_requested.connect(self.on_captcha_requested)
@@ -2611,12 +2672,34 @@ class ModernMangaDexGUI(QMainWindow):
 
     def on_download_finished(self):
         self.download_btn.setEnabled(True)
-        self.progress_bar.setVisible(False)
-        self.log_text.setVisible(False)
+        self.download_btn.reset()
         self.log("Download complete!")
         QMessageBox.information(self, "Success", "All selected chapters have been downloaded.")
 
-                                
+    def add_to_library(self):
+        if not hasattr(self, 'selected_manga') or not self.selected_manga:
+            QMessageBox.warning(self, "No Manga", "Please select a manga first.")
+            return
+        
+        mid = self.selected_manga['id']
+        title = self.get_preferred_title(self.selected_manga)
+        source = self.selected_manga.get('source', 'mangadex')
+        
+        # Check if already in library
+        if mid in self.library:
+            QMessageBox.information(self, "Library", f"'{title}' is already in your library.")
+            return
+            
+        self.library[mid] = {
+            "title": title,
+            "id": mid,
+            "added_at": time.time(),
+            "source": source,
+            "cover_url": self.selected_manga.get('cover_url') or self.selected_manga.get('cover_filename'),
+            "status": self.selected_manga.get('status', 'Unknown')
+        }
+        self.save_library()
+        QMessageBox.information(self, "Library", f"Added '{title}' to library.")
 
     def load_settings(self):
         try:
@@ -2626,7 +2709,7 @@ class ModernMangaDexGUI(QMainWindow):
         return {}
 
     def save_settings(self):
-        self.settings["romaji_titles"] = self.romaji_chk.isChecked()
+        self.settings["romaji_titles"] = self.romaji_toggle.isChecked()
         self.settings["data_saver"] = self.data_saver_chk.isChecked()
         self.settings["cbz_mode"] = self.cbz_chk.isChecked()
         self.settings["debug_mode"] = self.debug_chk.isChecked()
