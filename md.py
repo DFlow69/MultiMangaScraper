@@ -50,7 +50,6 @@ logging.basicConfig(
 API = "https://api.mangadex.org"
 BAOZIMH_BASE = "https://www.baozimh.com"
 HAPPYMH_BASE = "https://m.happymh.com"
-RAWKUMA_BASE = "https://rawkuma.net"
 LIBRARY_FILE = "library.json"
 console = Console()
 
@@ -201,6 +200,18 @@ def fetch_happymh_response(url: str, referer: Optional[str] = None):
         return None
 
 def fetch_happymh_html(url: str, referer: Optional[str] = None) -> Optional[str]:
+    # Check if user provided a research file first (Manual Override)
+    research_file = Path("baozimh_research/happymh.txt")
+    if research_file.exists():
+        try:
+            with open(research_file, "r", encoding="utf-8") as f:
+                content = f.read()
+                if content and len(content) > 100:
+                    logging.info(f"Using manual research file content for {url}")
+                    return content
+        except Exception as e:
+            logging.error(f"Error reading research file: {e}")
+
     r = fetch_happymh_response(url, referer=referer)
     if r:
         return r.text
@@ -264,15 +275,15 @@ def search_happymh(query: str) -> List[dict]:
             html = fetch_happymh_html(query)
             if html:
                 soup = BeautifulSoup(html, "html.parser")
-                title_tag = soup.select_one(".mg-title") or soup.select_one("h1")
+                title_tag = soup.select_one(".mg-title") or soup.select_one("h1") or soup.select_one(".MuiTypography-h3") or soup.select_one(".MuiTypography-h4")
                 title = title_tag.get_text(strip=True) if title_tag else manga_id
                 
                 eng = get_english_title(title)
                 if eng:
                     title = f"{eng} ({title})"
                 
-                cover_tag = soup.select_one(".mg-banner img") or soup.select_one(".mg-poster img")
-                cover_url = cover_tag.get("src") if cover_tag else ""
+                cover_tag = soup.select_one(".mg-banner img") or soup.select_one(".mg-poster img") or soup.select_one(".MuiCardMedia-root") or soup.select_one("img[src*='poster']")
+                cover_url = cover_tag.get("src") or cover_tag.get("data-src") if cover_tag else ""
                 
                 return [{
                     "id": manga_id,
@@ -323,14 +334,14 @@ def search_happymh(query: str) -> List[dict]:
     
     # Looking for comic cards. Based on Mui structure, they might be in a list or grid.
     # Based on general Mui patterns:
-    cards = soup.select("a[href^='/manga/']")
+    cards = soup.select("a[href^='/manga/'], *[data-href^='/manga/']")
     
     for card in cards:
         try:
-            href = card.get("href")
+            href = card.get("href") or card.get("data-href")
             manga_id = href.split("/")[-1]
             
-            title_tag = card.select_one(".MuiTypography-root") or card.select_one("div")
+            title_tag = card.select_one(".MuiTypography-root") or card.select_one("div") or card.select_one(".mg-manga-name")
             title_text = title_tag.get_text(strip=True) if title_tag else "Unknown"
             
             # Filter out duplicates or non-manga links if any
@@ -341,7 +352,7 @@ def search_happymh(query: str) -> List[dict]:
             display_title = f"{eng_title} ({title_text})" if eng_title else title_text
             
             img_tag = card.find("img")
-            cover_url = img_tag.get("src") if img_tag else ""
+            cover_url = img_tag.get("src") or img_tag.get("data-src") if img_tag else ""
             
             results.append({
                 "id": manga_id,
@@ -363,17 +374,6 @@ def fetch_chapters_happymh(manga_id: str) -> List[dict]:
     url = f"{HAPPYMH_BASE}/manga/{manga_id}"
     html = fetch_happymh_html(url)
     
-    # Fallback: check if user provided a research file
-    if not html:
-        research_file = Path("baozimh_research/happymh.txt")
-        if research_file.exists():
-            logging.info(f"Using manual research file for {manga_id}")
-            try:
-                with open(research_file, "r", encoding="utf-8") as f:
-                    html = f.read()
-            except Exception as e:
-                logging.error(f"Error reading research file: {e}")
-    
     if not html: return []
     
     soup = BeautifulSoup(html, "html.parser")
@@ -381,11 +381,11 @@ def fetch_chapters_happymh(manga_id: str) -> List[dict]:
     
     # 1. Try to find all chapter links in the HTML
     # The user says only 9 show by default, but maybe the rest are hidden in the DOM.
-    links = soup.select("a[href*='/mangaread/']")
+    links = soup.select("a[href*='/mangaread/'], *[data-href*='/mangaread/']")
     
     # 2. If we don't have many, look for a JSON blob in script tags.
     # Often Mui/React apps keep the full data in a script.
-    if len(links) < 10:
+    if len(links) < 2:
         scripts = soup.find_all("script")
         for s in scripts:
             if not s.string: continue
@@ -416,12 +416,12 @@ def fetch_chapters_happymh(manga_id: str) -> List[dict]:
 
     seen_ids = set()
     for link in links:
-        href = link.get("href")
+        href = link.get("href") or link.get("data-href")
         if not href or href in seen_ids: continue
         seen_ids.add(href)
         
         # Extract title from the nested span
-        title_tag = link.select_one(".MuiListItemText-primary") or link.select_one("span")
+        title_tag = link.select_one(".MuiListItemText-primary") or link.select_one("span") or link.select_one(".mg-chapter-name")
         text = title_tag.get_text(strip=True) if title_tag else link.get_text(strip=True)
         
         num_match = re.search(r'(\d+)', text)
@@ -792,294 +792,6 @@ def search_baozimh(query: str) -> List[dict]:
             results = filtered
             
     return results
-
-def search_rawkuma(query: str) -> List[dict]:
-    logging.debug(f"Searching Rawkuma with query: {query}")
-    
-    # Simple search via URL parameter
-    search_url = f"{RAWKUMA_BASE}/?s={query}"
-    try:
-        r = requests.get(search_url, timeout=15)
-        r.raise_for_status()
-        html = r.text
-        soup = BeautifulSoup(html, "html.parser")
-        
-        results = []
-        
-        seen_urls = set()
-        
-        # Try to find article tags or similar containers
-        articles = soup.find_all("div", class_="book-item") # Common in WP manga themes
-        if not articles:
-            articles = soup.find_all("div", class_="bsx") # Another common one
-        if not articles:
-            # Fallback: look for any 'a' tag that links to /manga/
-            links = soup.find_all("a", href=True)
-            for a in links:
-                href = a.get("href")
-                if "/manga/" in href and not "/chapter-" in href:
-                    if href in seen_urls: continue
-                    seen_urls.add(href)
-                    
-                    title = a.get("title") or a.get_text(strip=True)
-                    if not title: continue
-                    
-                    # Extract ID (slug)
-                    manga_id = href.strip("/").split("/")[-1]
-                    
-                    # Try to find cover
-                    img = a.find("img")
-                    cover = img.get("src") if img else ""
-                    
-                    results.append({
-                        "id": href, # Use full URL as ID for simplicity
-                        "title": title,
-                        "status": "Unknown",
-                        "description": "Rawkuma Series",
-                        "cover_filename": cover,
-                        "matched": True,
-                        "all_candidates": [title],
-                        "available_languages": ["en", "raw"],
-                        "source": "rawkuma"
-                    })
-        
-        return results
-        
-    except Exception as e:
-        logging.error(f"Error searching Rawkuma: {e}")
-        return []
-
-def fetch_chapters_rawkuma(manga_id: str) -> List[dict]:
-    # manga_id should be the full URL or slug
-    if manga_id.startswith("http"):
-        url = manga_id
-    else:
-        url = f"{RAWKUMA_BASE}/manga/{manga_id}/"
-        
-    logging.debug(f"Fetching Rawkuma chapters from: {url}")
-    
-    try:
-        r = requests.get(url, timeout=15)
-        r.raise_for_status()
-        html = r.text
-        soup = BeautifulSoup(html, "html.parser")
-        
-        # Check for HTMX chapter list
-        chapter_list_div = soup.find("div", id="chapter-list")
-        if chapter_list_div and chapter_list_div.get("hx-get"):
-            hx_url = chapter_list_div.get("hx-get").strip()
-            if not hx_url.startswith("http"):
-                 hx_url = f"{RAWKUMA_BASE}{hx_url}" if hx_url.startswith("/") else f"{RAWKUMA_BASE}/{hx_url}"
-            
-            logging.debug(f"Fetching HTMX chapter list from: {hx_url}")
-            r2 = requests.get(hx_url, timeout=15)
-            r2.raise_for_status()
-            soup = BeautifulSoup(r2.text, "html.parser")
-        
-        chapters = []
-        seen_urls = set()
-        
-        # Strategy: Look for Google Drive links
-        # The user says "all chapters have download links"
-        # Link format: https://drive.google.com/uc?id=...&export=download
-        
-        # Try to find chapter items via data-chapter-number (HTMX structure)
-        chapter_items = soup.find_all("div", attrs={"data-chapter-number": True})
-        
-        if chapter_items:
-            for item in chapter_items:
-                # Find GDrive link in this item
-                glink = item.find("a", href=lambda h: h and "drive.google.com" in h)
-                if not glink: continue
-                
-                href = glink.get("href")
-                if href in seen_urls: continue
-                seen_urls.add(href)
-                
-                # Title extraction
-                title = f"Chapter {item.get('data-chapter-number')}" # Default
-                
-                # Try to get more specific title from the chapter link
-                # Look for link containing 'chapter-'
-                chap_link = item.find("a", href=lambda h: h and "/chapter-" in h)
-                if chap_link:
-                    # The text inside usually has "Chapter X"
-                    # But might be nested in spans.
-                    # e.g. <div class="flex ..."><span>Chapter 22</span></div>
-                    # We can get all text from chap_link
-                    ctext = chap_link.get_text(" ", strip=True)
-                    # Extract "Chapter X" using regex if possible
-                    m = re.search(r'(Chapter\s+\d+(\.\d+)?)', ctext, re.IGNORECASE)
-                    if m:
-                        title = m.group(1)
-                    elif ctext:
-                        title = ctext
-                
-                chapters.append({
-                    "id": href,
-                    "title": title,
-                    "language": "raw",
-                    "scanlator": "Rawkuma",
-                    "date": "",
-                    "source": "rawkuma"
-                })
-        else:
-            # Fallback for old structure or if parsing failed
-            gdrive_links = soup.select('a[href*="drive.google.com"]')
-            for link in gdrive_links:
-                href = link.get("href")
-                if not href or href in seen_urls: continue
-                
-                title_candidate = "Chapter (Unknown)"
-                
-                # Look for parent container
-                container = link.find_parent("li") or link.find_parent("div", class_="flex") or link.find_parent("div")
-                if container:
-                     # Try to find "Chapter X" in text
-                    text = container.get_text(" ", strip=True)
-                    m = re.search(r'(Chapter\s+\d+(\.\d+)?)', text, re.IGNORECASE)
-                    if m:
-                        title_candidate = m.group(1)
-                    else:
-                        # Fallback: remove "Download"
-                        text = text.replace("Download", "").strip()
-                        if text: title_candidate = text
-                
-                seen_urls.add(href)
-                chapters.append({
-                    "id": href,
-                    "title": title_candidate,
-                    "language": "raw",
-                    "scanlator": "Rawkuma",
-                    "date": "",
-                    "source": "rawkuma"
-                })
-            
-        return chapters
-        
-    except Exception as e:
-        logging.error(f"Error fetching Rawkuma chapters: {e}")
-        return results
-
-def slugify_rawkuma(text: str) -> str:
-    # Basic slugify: lowercase, remove special chars, spaces to hyphens
-    text = text.lower()
-    text = re.sub(r'[^\w\s-]', '', text)
-    text = re.sub(r'[\s]+', '-', text)
-    return text.strip('-')
-
-def search_rawkuma(query: str) -> List[dict]:
-    logging.debug(f"Searching Rawkuma with query: {query}")
-    
-    # 0. Check if query is already a Rawkuma URL
-    if "rawkuma.net/manga/" in query:
-        return [{
-            "id": query,
-            "title": "Direct URL",
-            "status": "Unknown",
-            "description": "Direct Link",
-            "cover_filename": "",
-            "matched": True,
-            "all_candidates": [],
-            "available_languages": ["raw"],
-            "source": "rawkuma"
-        }]
-
-    # 1. Use Anilist to find candidates
-    url = 'https://graphql.anilist.co'
-    query_graphql = '''
-    query ($search: String) {
-      Page(page: 1, perPage: 5) {
-        media(search: $search, type: MANGA, sort: SEARCH_MATCH) {
-          title {
-            romaji
-            english
-            native
-          }
-          synonyms
-          coverImage {
-            large
-          }
-        }
-      }
-    }
-    '''
-    variables = {'search': query}
-    
-    candidates = []
-    try:
-        r = requests.post(url, json={'query': query_graphql, 'variables': variables}, timeout=5)
-        if r.status_code == 200:
-            data = r.json()
-            media_list = data.get('data', {}).get('Page', {}).get('media', [])
-            for media in media_list:
-                titles = media.get('title', {})
-                t_romaji = titles.get('romaji')
-                t_english = titles.get('english')
-                syns = media.get('synonyms', [])
-                
-                slug_candidates = []
-                if t_romaji: slug_candidates.append((t_romaji, "Romaji"))
-                if t_english: slug_candidates.append((t_english, "English"))
-                for s in syns: slug_candidates.append((s, "Synonym"))
-                
-                display_title = t_english or t_romaji or "Unknown"
-                cover = media.get('coverImage', {}).get('large', "")
-                
-                candidates.append({
-                    "display_title": display_title,
-                    "cover": cover,
-                    "slugs": slug_candidates
-                })
-    except Exception as e:
-        logging.error(f"Anilist search failed: {e}")
-        # Fallback: try query as slug
-        candidates.append({
-            "display_title": query,
-            "cover": "",
-            "slugs": [(query, "Query")]
-        })
-
-    results = []
-    seen_ids = set()
-    
-    # 2. Validate candidates against Rawkuma
-    for cand in candidates:
-        found_for_cand = False
-        for title_text, source_type in cand['slugs']:
-            if found_for_cand: break # Only need one valid URL per manga
-            
-            slug = slugify_rawkuma(title_text)
-            if not slug: continue
-            
-            check_url = f"{RAWKUMA_BASE}/manga/{slug}/"
-            if check_url in seen_ids: continue
-            
-            logging.debug(f"Checking Rawkuma URL: {check_url}")
-            try:
-                # Use HEAD to check existence
-                resp = requests.head(check_url, timeout=5, allow_redirects=True)
-                
-                if resp.status_code == 200:
-                    results.append({
-                        "id": check_url,
-                        "title": cand['display_title'],
-                        "status": "Unknown",
-                        "description": f"Found via {source_type}: {title_text}",
-                        "cover_filename": cand['cover'],
-                        "matched": True,
-                        "all_candidates": [title_text],
-                        "available_languages": ["raw"],
-                        "source": "rawkuma"
-                    })
-                    seen_ids.add(check_url)
-                    found_for_cand = True
-            except Exception as e:
-                pass
-                
-    return results
-
-
 
 def fetch_chapters_baozimh(manga_id: str) -> List[dict]:
                                                    
@@ -1590,7 +1302,7 @@ def main():
         if action == "Change Source":
             new_source = questionary.select(
                 "Select Source",
-                choices=["MangaDex", "Baozimh", "Happymh", "Rawkuma"]
+                choices=["MangaDex", "Baozimh", "Happymh"]
             ).ask()
             if new_source:
                 current_source = new_source
@@ -1698,8 +1410,6 @@ def main():
                         console.print("[yellow]Happymh search returned no results. This might be due to Cloudflare protection.[/yellow]")
                         console.print("[cyan]Tip: Try pasting the direct manga URL instead of searching.[/cyan]")
                         console.print("[cyan]Tip: You can also place your browser cookies in 'happymh_cookies.json'.[/cyan]")
-                elif current_source == "Rawkuma":
-                    results = search_rawkuma(query)
             except Exception as e:
                 console.print(f"[red]Search failed: {e}[/red]")
                 continue
@@ -1784,8 +1494,6 @@ def main():
                 chapters = fetch_chapters_baozimh(manga_id)
             elif current_source == "Happymh":
                 chapters = fetch_chapters_happymh(manga_id)
-            elif current_source == "Rawkuma":
-                chapters = fetch_chapters_rawkuma(manga_id)
         except Exception as e:
             console.print(f"[red]Failed to fetch chapters: {e}[/red]")
             chapters = []
@@ -1946,55 +1654,6 @@ def main():
             ch_num = chapter_entry.get('chapter') or '?'
             console.print(f"Processing Chapter {ch_num} (ID: {chapter_id})...")
             
-            if current_source == "Rawkuma":
-                try:
-                    gdrive_url = chapter_entry['id']
-                    console.print(f"Downloading from GDrive: {gdrive_url}")
-                    
-                    session = requests.Session()
-                    r = session.get(gdrive_url, stream=True, timeout=60)
-                    r.raise_for_status()
-                    
-                    token = None
-                    for key, value in r.cookies.items():
-                        if key.startswith('download_warning'):
-                            token = value
-                            break
-                            
-                    if token:
-                         params = {'confirm': token}
-                         r = session.get(gdrive_url, params=params, stream=True, timeout=60)
-                         r.raise_for_status()
-                    
-                    fname = f"Chapter {ch_num}.zip"
-                    if "Content-Disposition" in r.headers:
-                        cd = r.headers["Content-Disposition"]
-                        fname_match = re.search(r'filename="?([^"]+)"?', cd)
-                        if fname_match:
-                            fname = fname_match.group(1)
-                    
-                    if make_cbz and fname.lower().endswith(".zip"):
-                        fname = fname[:-4] + ".cbz"
-                    elif make_cbz and not fname.lower().endswith(".cbz"):
-                        fname += ".cbz"
-                    
-                    dest = Path(base_out) / fname
-                    Path(base_out).mkdir(parents=True, exist_ok=True)
-                    
-                    total = int(r.headers.get("content-length", 0) or 0)
-                    with tqdm(total=total, unit="B", unit_scale=True, desc=fname, leave=False) as t:
-                        with open(dest, "wb") as f:
-                            for chunk in r.iter_content(8192):
-                                if chunk:
-                                    f.write(chunk)
-                                    t.update(len(chunk))
-                                    
-                    console.print(f"[green]Downloaded {fname}[/green]")
-                    
-                except Exception as e:
-                    console.print(f"[red]Error downloading Rawkuma chapter {ch_num}: {e}[/red]")
-                continue
-
             try:
                 image_urls = []
                 
