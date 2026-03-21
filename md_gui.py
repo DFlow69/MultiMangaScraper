@@ -1336,65 +1336,6 @@ class SearchWorker(QThread):
         self.query = query
         self.site = site
 
-    def download_chapter_baozimh_pro(self, chap, out_path, ch_num, i, total_chaps):
-        """Baozimh Industrial Download: Selenium + Multi-page + Nuclear Bypass"""
-        if not selenium_available:
-            self.progress.emit("Selenium not available for Baozimh pro extraction")
-            return False
-            
-        if not self._selenium_driver:
-            self.progress.emit("Launching Browser for Baozimh Pro...")
-            self._selenium_driver = Driver(uc=True, headless=False, disable_csp=True, undetectable=True, browser="chrome", user_data_dir=None)
-        
-        driver = self._selenium_driver
-        url = chap['id'] if chap['id'].startswith("http") else urljoin(BAOZIMH_BASE, chap['id'])
-        
-        try:
-            driver.get(url)
-            time.sleep(2)
-            
-            # Use industrial-grade multi-page extraction
-            img_urls = extract_complete_baozimh_chapter(driver)
-            
-            if not img_urls:
-                self.progress.emit(f"No images found for Baozimh Ch {ch_num}")
-                return False
-                
-            self.progress.emit(f"Found {len(img_urls)} images across multiple pages. Downloading...")
-            if not out_path.exists():
-                out_path.mkdir(parents=True, exist_ok=True)
-                
-            session = requests.Session()
-            for j, img_url in enumerate(img_urls, 1):
-                if not self._is_running: break
-                
-                # Apply nuclear bypass (already applied in extract_complete_baozimh_chapter, but double check)
-                img_url = baozimh_nuclear_watermark_bypass(img_url)
-                
-                ext = ".jpg"
-                if ".png" in img_url.lower(): ext = ".png"
-                elif ".webp" in img_url.lower(): ext = ".webp"
-                
-                fname = out_path / f"{j:03d}{ext}"
-                if not fname.exists():
-                    try:
-                        r = session.get(img_url, timeout=30, stream=True)
-                        r.raise_for_status()
-                        with open(fname, "wb") as f:
-                            for chunk in r.iter_content(8192):
-                                f.write(chunk)
-                    except Exception as e:
-                        print(f"Error downloading {img_url}: {e}")
-                
-                chapter_progress = j / len(img_urls)
-                total_progress = ((i + chapter_progress) / total_chaps) * 100
-                self.percent.emit(int(total_progress))
-                
-            return True
-        except Exception as e:
-            if self.debug_mode: print(f"DEBUG: Baozimh Pro failed: {e}")
-            return False
-
     def run(self):
         try:
             if self.isInterruptionRequested(): return
@@ -1503,6 +1444,26 @@ class DownloadWorker(QThread):
         self._selenium_driver = None
         self._newtoki_driver = None
         self.captcha_response = None
+        
+        # PROPER seleniumbase import
+        try:
+            from seleniumbase import Driver
+            self.Driver = Driver  # Store class reference
+            if self.debug_mode: print("✅ SeleniumBase Driver imported")
+        except ImportError:
+            if self.debug_mode: print("❌ SeleniumBase missing → Using generic fallback")
+            self.Driver = None
+
+    def get_driver(self):
+        """Safe driver initialization"""
+        if self._selenium_driver is None and self.Driver:
+            try:
+                self.progress.emit("Launching Browser...")
+                self._selenium_driver = self.Driver(uc=True, headless=False, disable_csp=True, undetectable=True, browser="chrome", user_data_dir=None)
+            except Exception as e:
+                print(f"Driver initialization failed: {e}")
+                self._selenium_driver = None
+        return self._selenium_driver
 
     def set_captcha_response(self, response):
         self.captcha_response = response
@@ -1635,11 +1596,11 @@ class DownloadWorker(QThread):
 
     def download_chapter_generic(self, chapter_url, title, output_dir, ch_num=None, i=0, total_chaps=1):
         """Your ORIGINAL - 50 images working"""
-        if not self._selenium_driver:
-            self.progress.emit("Launching Generic Browser...")
-            self._selenium_driver = Driver(uc=True, headless=False)
+        driver = self.get_driver()
+        if not driver:
+            # If Selenium completely fails, try HTTP fallback here too
+            return self._http_fallback(chapter_url, title, output_dir, i, total_chaps)
             
-        driver = self._selenium_driver
         driver.get(chapter_url)
         images = self.extract_images_with_autoscroll(driver)
          
@@ -1648,58 +1609,120 @@ class DownloadWorker(QThread):
             return True
         return False
 
-    def download_chapter_baozimh_pro(self, chap, out_path, ch_num, i, total_chaps, series_url=None):
-        """TAKE series_url + chapter_title → BUILD perfect twmanga URLs"""
-        if not self._selenium_driver:
-            self.progress.emit("Launching Browser for Baozimh Pro...")
-            self._selenium_driver = Driver(uc=True, headless=False, disable_csp=True, undetectable=True, browser="chrome", user_data_dir=None)
+    def build_twmanga_url(self, series_slug, chapter_num):
+        """ANY series → perfect twmanga URL"""
+        return f"https://www.twmanga.com/comic/chapter/{series_slug}/0_{chapter_num}.html"
+
+    def get_series_slug(self, series_url, chapter_title):
+        """Map series title/URL to known slugs for URL construction"""
+        if 'laoshexiuxianchuan-linshi1' in series_url:
+            return 'laoshexiuxianchuan-linshi1'
+        if 'daoguaiyixian' in series_url or '道詭異仙' in series_url or '道詭異仙' in chapter_title:
+            return 'daoguaiyixian'
         
-        driver = self._selenium_driver
-        title = chap.get('title', '')
-        output_dir = out_path
-        
-        # Use provided series_url or fallback to a default
-        s_url = series_url or f"https://www.baozimh.com/comic/laoshexiuxianchuan-linshi1"
-         
+        # Generic extraction from URL
+        series_match = re.search(r'comic[/_]([^/]+)', series_url)
+        return series_match.group(1) if series_match else 'laoshexiuxianchuan-linshi1'
+
+    def extract_images_http(self, url):
+        """HTTP-only image extraction fallback"""
         try:
-            # BUILD CORRECT BASE URL 
-            base_chapter_url = self.build_twmanga_chapter_url(s_url, title)
-            print(f"🔗 BUILT URL: {base_chapter_url}")
-             
-            driver.get(base_chapter_url)
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+            resp = requests.get(url, headers=headers, timeout=15)
+            if resp.status_code != 200: return []
+            
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            image_urls = []
+            selectors = ['img[src*="baozimh"]', 'img[src*="baozicdn"]', 'img', 'p img', '.content img']
+            
+            for selector in selectors:
+                imgs = soup.select(selector)
+                for img in imgs:
+                    src = img.get('src') or img.get('data-src') or img.get('data-lazy')
+                    if src and src.startswith('http'):
+                        image_urls.append(src)
+            return list(dict.fromkeys(image_urls))
+        except:
+            return []
+
+    def _http_fallback(self, chapter_url, title, output_dir, i_base=0, total_chaps=1):
+        """Final fallback - No browser needed"""
+        self.progress.emit("Using HTTP-only fallback...")
+        images = self.extract_images_http(chapter_url)
+        if images:
+            self.download_images_batch(images, output_dir, title, i_base, total_chaps)
+            return True
+        return False
+
+    def _baozimh_selenium_pro(self, chap, out_path, ch_num, i, total_chaps, series_url):
+        """Selenium version - ONLY if Driver works"""
+        if not self.Driver:
+            raise Exception("No Driver available")
+        
+        driver = self.get_driver()
+        if not driver:
+            raise Exception("Driver initialization failed")
+            
+        title = chap.get('title', '')
+        s_url = series_url or f"https://www.baozimh.com/comic/laoshexiuxianchuan-linshi1"
+        
+        # Extract series/chapter info
+        series_slug = self.get_series_slug(s_url, title)
+        
+        # Extract chapter number from title: "第80話" → 80 or "Ch 76" -> 76
+        chapter_match = re.search(r'(?:第|Ch\s*)(\d+)', title)
+        chapter_num = chapter_match.group(1) if chapter_match else "80"
+        
+        base_chapter_url = self.build_twmanga_url(series_slug, chapter_num)
+        print(f"🔗 BUILT PRO URL: {base_chapter_url}")
+        
+        driver.get(base_chapter_url)
+        time.sleep(3)
+        
+        # GET TOTAL PAGES 
+        _, total_pages = self.get_page_info_from_title(driver)
+        print(f"📚 {total_pages} pages total") 
+        
+        # GET ALL PAGE URLS 
+        page_urls = self.get_all_page_urls(base_chapter_url, total_pages)
+        
+        all_images = []
+        for j, page_url in enumerate(page_urls, 1):
+            if not self._is_running: break
+            print(f"📄 Page {j}/{total_pages}: {page_url}") 
+            driver.get(page_url)
             time.sleep(3)
-             
-            # GET TOTAL PAGES 
-            _, total_pages = self.get_page_info_from_title(driver)
-            print(f"📚 {total_pages} pages total") 
-             
-            # GET ALL PAGE URLS 
-            page_urls = self.get_all_page_urls(base_chapter_url, total_pages)
-             
-            all_images = []
-            for j, page_url in enumerate(page_urls, 1):
-                print(f"📄 Page {j}/{total_pages}: {page_url}") 
-                driver.get(page_url)
-                time.sleep(3)
-                 
-                page_images = self.extract_images_with_autoscroll(driver) 
-                unique_page_images = list(dict.fromkeys(page_images)) # Dedupe preserving order
-                all_images.extend(unique_page_images)
-                print(f"   → {len(unique_page_images)} images (total unique: {len(set(all_images))})") 
-             
-            # DOWNLOAD (YOUR WORKING VERSION)
-            if all_images:
-                unique_images = list(dict.fromkeys(all_images)) # Dedupe preserving order
-                self.download_images_batch(unique_images, output_dir, title, i, total_chaps)
-                print(f"✅ Downloaded {len(unique_images)} images across {total_pages} pages!") 
-                return True
-                 
-        except Exception as e:
-            print(f"BaOzimh Pro failed: {e}")
-         
-        # GENERIC FALLBACK (your 50-image version) 
+            
+            page_images = self.extract_images_with_autoscroll(driver) 
+            unique_page_images = list(dict.fromkeys(page_images))
+            all_images.extend(unique_page_images)
+            print(f"   → {len(unique_page_images)} images (total unique: {len(set(all_images))})") 
+        
+        if all_images:
+            unique_images = list(dict.fromkeys(all_images))
+            self.download_images_batch(unique_images, out_path, title, i, total_chaps)
+            print(f"✅ Downloaded {len(unique_images)} images across {total_pages} pages!") 
+            return True
+        return False
+
+    def download_chapter_baozimh_pro(self, chap, out_path, ch_num, i, total_chaps, series_url=None):
+        """Works for ANY series + Multiple fallbacks"""
         chapter_url = chap['id'] if chap['id'].startswith("http") else urljoin(BAOZIMH_BASE, chap['id'])
-        return self.download_chapter_generic(chapter_url, title, output_dir, ch_num, i, total_chaps)
+        title = chap.get('title', '')
+        
+        # TRIPLE FALLBACK CHAIN
+        try:
+            # 1. SeleniumBase Pro (ideal)
+            return self._baozimh_selenium_pro(chap, out_path, ch_num, i, total_chaps, series_url)
+        except Exception as e1:
+            print(f"❌ Selenium Pro failed: {e1}")
+            try:
+                # 2. Generic browser (working 50 images)
+                return self.download_chapter_generic(chapter_url, title, out_path, ch_num, i, total_chaps)
+            except Exception as e2:
+                print(f"❌ Generic failed: {e2}")
+                # 3. HTTP only (no browser)
+                return self._http_fallback(chapter_url, title, out_path, i, total_chaps)
 
     def download_chapter_complete(self, chapter_url, out_path, ch_num, i, total_chaps, chap):
         if not selenium_available:
@@ -1707,9 +1730,10 @@ class DownloadWorker(QThread):
             return False
             
         if not self._selenium_driver:
-            self.progress.emit("Launching SeleniumBase UC Mode (Visible)...")
-            # UC Mode Chrome (uc=True, headless=False) - WATCH bypass live
-            self._selenium_driver = Driver(uc=True, headless=False)
+            self._selenium_driver = self.get_driver()
+            if not self._selenium_driver:
+                self.progress.emit("Selenium initialization failed for Happymh")
+                return False
             self._selenium_driver.set_page_load_timeout(120)
 
         try:
