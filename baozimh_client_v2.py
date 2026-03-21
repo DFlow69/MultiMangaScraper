@@ -42,43 +42,38 @@ def test_url_works(url, timeout=3):
         except:
             return False
 
-def baozimh_watermark_bypass(img_url):
-    """Universal BaOzimh watermark removal - Brute Force ALL CDN patterns"""
+def baozimh_universal_watermark_bypass(img_url):
+    """Universal BaOzimh watermark removal - ALL CDN patterns"""
     if not img_url: return img_url
     
-    # ALL POSSIBLE clean CDNs (15+ targets)
+    # EXTRACT path (universal)
+    path_match = re.search(r'https?://[^/]+/(.+)$', img_url)
+    if not path_match: return img_url
+    path = path_match.group(1)
+     
+    # ALL POSSIBLE clean CDNs
     clean_cdns = [
         'static-tw.baozimh.com',
         'static.baozimh.com', 
         'img.baozimh.com',
         'cdn.baozimh.com',
-        'tw.baozimh.com',
-        'static-tw.baozicdn.com',
-        'i.baozimh.com',
-        'images.baozimh.com'
+        'tw.baozimh.com'
     ]
-    
-    # Extract path after domain
-    path_match = re.search(r'https?://[^/]+/(.+)$', img_url)
-    if not path_match: return img_url
-    path = path_match.group(1)
-
+     
     # Skip if already a clean domain
     current_domain = urlparse(img_url).netloc
     if current_domain in clean_cdns:
         return img_url
 
-    # Check if it's a known BaOzimh or Baozicdn domain
-    if 'baozimh' in img_url.lower() or 'baozicdn' in img_url.lower():
-        for cdn in clean_cdns:
-            test_url = f"https://{cdn}/{path}"
-            if test_url_works(test_url):
-                return test_url
-        
-        # Fallback to static-tw
-        return f"https://static-tw.baozimh.com/{path}"
-
+    for cdn in clean_cdns:
+        test_url = f"https://{cdn}/{path}"
+        if test_url_works(test_url):
+            return test_url
+            
     return img_url
+
+def baozimh_watermark_bypass(img_url):
+    return baozimh_universal_watermark_bypass(img_url)
 
 class BaozimhClient:
     BASE_URL = "https://www.baozimh.com"

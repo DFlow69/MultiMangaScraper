@@ -355,72 +355,84 @@ def extract_images_current_page(driver):
             urls.append(src)
     return list(dict.fromkeys(urls))
 
-def extract_complete_baozimh_chapter(driver):
-    """Follow ALL pages: next_chapter OR predict sequential URLs"""
+def extract_complete_baozimh_chapter_fixed(driver):
+    """FIXED: No loopbacks + Sequential prediction"""
     all_images = []
+    visited_urls = set()  # PREVENT LOOPBACKS
     base_url = driver.current_url
     page_num = 1
-    visited = {base_url}
      
-    while True:
-        print(f"📄 Processing page {page_num}...")
+    while page_num <= 50:  # Max 50 pages
+        current_url = driver.current_url
+        print(f"📄 Page {page_num}: {current_url}")
          
-        # 1. Extract images from current page
+        # LOOPBACK CHECK
+        if current_url in visited_urls:
+            print("🔄 LOOP DETECTED - switching to sequential prediction")
+            break
+             
+        visited_urls.add(current_url)
+         
+        # Extract images
         page_images = extract_images_current_page(driver)
-        page_images = [baozimh_nuclear_watermark_bypass(url) for url in page_images]
-        
-        # Dedupe while adding
-        for img in page_images:
-            if img not in all_images:
-                all_images.append(img)
+        if page_images:
+            # Apply nuclear bypass to each page's images
+            clean_page_images = [baozimh_nuclear_watermark_bypass(url) for url in page_images]
+            all_images.extend(clean_page_images)
+            print(f"   → {len(page_images)} images")
+        else:
+            print("   → No images found on this page")
          
-        # 2. Try next_chapter link FIRST
+        # NEXT LINK (with loopback protection)
         soup = BeautifulSoup(driver.page_source, 'html.parser')
-        next_link = soup.select_one('div.next_chapter a, .next-page a, a[href*="下一頁"]')
+        next_link = soup.select_one('div.next_chapter a[href*="_"], .next-page a, a[href*="下一頁"]')
          
         if next_link:
-            next_url = urljoin(driver.current_url, next_link.get('href'))
-            if next_url not in visited:
+            next_href = next_link.get('href')
+            next_url = urljoin(current_url, next_href)
+            if next_url not in visited_urls and "#bottom" not in next_href:
                 print(f"🔗 Next link found: {next_url}")
                 driver.get(next_url)
-                visited.add(next_url)
                 page_num += 1
                 time.sleep(2)
                 continue
-          
-        # 3. PREDICT sequential page (_2.html → _3.html → _4.html...)
-        current_path = driver.current_url
-        if not re.search(r'_\d+\.html$', current_path):
-            # Try appending _2.html if it's the first page
-            predicted_next = re.sub(r'\.html$', '_2.html', current_path)
+         
+        # SEQUENTIAL PREDICTION (0_80_2 → 0_80_3 → 0_80_4...)
+        # Remove any anchors or params
+        pure_path = current_url.split('#')[0].split('?')[0]
+        
+        if '_2.html' in pure_path:
+            predicted = re.sub(r'_2\.html$', '_3.html', pure_path)
+        elif re.search(r'_(\d+)\.html$', pure_path):
+            predicted = re.sub(r'_(\d+)\.html$', lambda m: f"_{int(m.group(1))+1}.html", pure_path)
         else:
-            predicted_next = re.sub(r'_(\d+)\.html$', lambda m: f"_{int(m.group(1))+1}.html", current_path)
-          
-        if predicted_next in visited:
+            predicted = pure_path.replace('.html', '_2.html')
+         
+        if predicted in visited_urls or predicted == pure_path:
             break
 
-        print(f"🔮 Predicting: {predicted_next}")
-        driver.get(predicted_next)
-        visited.add(predicted_next)
+        print(f"🔮 Predicting next page: {predicted}")
+        driver.get(predicted)
         time.sleep(2)
-          
-        # 4. Check if page exists (title, content, 404)
-        if "404" in driver.title.lower() or "not found" in driver.page_source.lower():
-            print(f"✅ End reached at predicted {predicted_next}")
+         
+        # PAGE EXISTS CHECK (404 or empty)
+        if "404" in driver.title or "not found" in driver.page_source.lower():
+            print(f"✅ End reached (404) at {predicted}")
             break
-              
-        # 5. Has images? Continue!
-        new_page_images = extract_images_current_page(driver)
-        if new_page_images:
-            page_num += 1
-            continue
-          
-        # 6. Empty page = END
-        print(f"✅ Chapter complete: {len(all_images)} images")
-        break
-      
-    driver.get(base_url)  # Return to start page
-    return all_images
+            
+        # Verify images on predicted page
+        if not extract_images_current_page(driver):
+            print(f"✅ End reached (No Images) at {predicted}")
+            break
+             
+        page_num += 1
+     
+    driver.get(base_url)
+    # Dedupe while preserving order
+    return list(dict.fromkeys(all_images))
+
+def extract_complete_baozimh_chapter(driver):
+    return extract_complete_baozimh_chapter_fixed(driver)
 
 def api_get(path: str, params: dict | None = None) -> dict:
     url = API.rstrip("/") + "/" + path.lstrip("/")
@@ -1514,6 +1526,123 @@ class DownloadWorker(QThread):
                 self._newtoki_driver.quit()
             except:
                 pass
+
+    def download_chapter_generic(self, chapter_url, title, out_path, ch_num, i, total_chaps):
+        """Universal fallback - works for ANY source"""
+        if not self._selenium_driver:
+            self.progress.emit("Launching Generic Browser...")
+            self._selenium_driver = Driver(uc=True, headless=False)
+            
+        driver = self._selenium_driver
+        try:
+            driver.get(chapter_url)
+            time.sleep(5) # Wait for load
+            
+            # Use existing extraction logic
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            img_urls = []
+            for img in soup.find_all('img'):
+                src = img.get('data-src') or img.get('data-original') or img.get('src')
+                if src and any(ext in src.lower() for ext in ['.jpg', '.png', '.webp', '.jpeg']):
+                    if 'icon' not in src.lower() and 'logo' not in src.lower():
+                        img_urls.append(src)
+            
+            if not img_urls:
+                self.progress.emit(f"No images found for Ch {ch_num}")
+                return False
+                
+            self.progress.emit(f"Found {len(img_urls)} images. Downloading...")
+            if not out_path.exists():
+                out_path.mkdir(parents=True, exist_ok=True)
+                
+            session = requests.Session()
+            for j, img_url in enumerate(img_urls, 1):
+                if not self._is_running: break
+                
+                # Apply watermark bypass
+                img_url = baozimh_universal_watermark_bypass(img_url)
+                
+                ext = ".jpg"
+                if ".png" in img_url.lower(): ext = ".png"
+                elif ".webp" in img_url.lower(): ext = ".webp"
+                
+                fname = out_path / f"{j:03d}{ext}"
+                if not fname.exists():
+                    try:
+                        r = session.get(img_url, timeout=30, stream=True)
+                        r.raise_for_status()
+                        with open(fname, "wb") as f:
+                            for chunk in r.iter_content(8192):
+                                f.write(chunk)
+                    except Exception as e:
+                        print(f"Error downloading {img_url}: {e}")
+                
+                chapter_progress = j / len(img_urls)
+                total_progress = ((i + chapter_progress) / total_chaps) * 100
+                self.percent.emit(int(total_progress))
+                
+            return True
+        except Exception as e:
+            self.progress.emit(f"Generic download failed: {e}")
+            return False
+
+    def download_chapter_baozimh_pro(self, chap, out_path, ch_num, i, total_chaps):
+        """Baozimh Industrial Download: Selenium + Fixed Multi-page + Nuclear Bypass"""
+        if not selenium_available:
+            self.progress.emit("Selenium not available for Baozimh pro extraction")
+            return False
+            
+        if not self._selenium_driver:
+            self.progress.emit("Launching Browser for Baozimh Pro...")
+            self._selenium_driver = Driver(uc=True, headless=False, disable_csp=True, undetectable=True, browser="chrome", user_data_dir=None)
+        
+        driver = self._selenium_driver
+        url = chap['id'] if chap['id'].startswith("http") else urljoin(BAOZIMH_BASE, chap['id'])
+        
+        try:
+            driver.get(url)
+            time.sleep(2)
+            
+            # Use FIXED industrial-grade multi-page extraction
+            img_urls = extract_complete_baozimh_chapter_fixed(driver)
+            
+            if not img_urls:
+                self.progress.emit(f"No images found for Baozimh Ch {ch_num}. Trying generic fallback...")
+                return self.download_chapter_generic(url, chap.get('title', ''), out_path, ch_num, i, total_chaps)
+                
+            self.progress.emit(f"Found {len(img_urls)} total images. Downloading clean versions...")
+            if not out_path.exists():
+                out_path.mkdir(parents=True, exist_ok=True)
+                
+            session = requests.Session()
+            for j, img_url in enumerate(img_urls, 1):
+                if not self._is_running: break
+                
+                # img_url is ALREADY bypassed inside extract_complete_baozimh_chapter_fixed
+                
+                ext = ".jpg"
+                if ".png" in img_url.lower(): ext = ".png"
+                elif ".webp" in img_url.lower(): ext = ".webp"
+                
+                fname = out_path / f"{j:03d}{ext}"
+                if not fname.exists():
+                    try:
+                        r = session.get(img_url, timeout=30, stream=True)
+                        r.raise_for_status()
+                        with open(fname, "wb") as f:
+                            for chunk in r.iter_content(8192):
+                                f.write(chunk)
+                    except Exception as e:
+                        print(f"Error downloading {img_url}: {e}")
+                
+                chapter_progress = j / len(img_urls)
+                total_progress = ((i + chapter_progress) / total_chaps) * 100
+                self.percent.emit(int(total_progress))
+                
+            return True
+        except Exception as e:
+            self.progress.emit(f"Baozimh Pro failed: {e}. Trying generic fallback...")
+            return self.download_chapter_generic(url, chap.get('title', ''), out_path, ch_num, i, total_chaps)
 
     def download_chapter_complete(self, chapter_url, out_path, ch_num, i, total_chaps, chap):
         if not selenium_available:
