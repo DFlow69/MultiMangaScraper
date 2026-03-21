@@ -25,47 +25,68 @@ class DownloadEvent:
     filepath: str = ""
     data: Any = None
 
+def test_url_works(url, timeout=5):
+    """Quick HEAD request - does URL return 200?"""
+    try:
+        # We need a session here or use requests directly
+        import requests
+        resp = requests.head(url, timeout=timeout, allow_redirects=True)
+        return resp.status_code == 200
+    except:
+        return False
+
 def baozimh_watermark_bypass(img_url):
-    """Universal BaOzimh watermark removal - ALL CDN patterns"""
+    """Universal BaOzimh watermark removal - Brute Force ALL CDN patterns"""
     if not img_url: return img_url
     
-    # Pattern 1: Original (baozicdn.com subdomains like tw.baozicdn.com, hk.baozicdn.com)
-    match = re.match(r'^https?://(?:[\w-]+\.)baozicdn\.com/(.+)$', img_url)
-    if match:
-        clean_url = f"https://static-tw.baozimh.com/{match.group(1)}"
-        print(f"DEBUG: Watermark bypass (P1) → {clean_url}")
-        return clean_url
-     
-    # Pattern 2: Regional CDNs (TW/HK/JP/KR or numeric subdomains)
-    match = re.match(r'^https?://(?:tw|hk|jp|kr|\d+)\.baozimh\.com/(.+)$', img_url)
-    if match:
-        clean_url = f"https://static-tw.baozimh.com/{match.group(1)}"
-        print(f"DEBUG: Watermark bypass (P2) → {clean_url}")
-        return clean_url
-     
-    # Pattern 3: App-specific or Static CDNs
-    match = re.match(r'^https?://(?:app|mobile|static[-\w]*)\.baozimh\.com/(.+)$', img_url)
-    if match:
-        clean_url = f"https://static-tw.baozimh.com/{match.group(1)}"
-        print(f"DEBUG: Watermark bypass (P3) → {clean_url}")
-        return clean_url
-     
-    # Pattern 4: Cloudflare or Direct IP patterns on baozimh domain
-    match = re.match(r'^https?://(?:\d{1,3}(?:\.\d{1,3}){3}|[\w-]+\.cloudflare)\.baozimh\.com/(.+)$', img_url)
-    if match:
-        clean_url = f"https://static-tw.baozimh.com/{match.group(1)}"
-        print(f"DEBUG: Watermark bypass (P4) → {clean_url}")
+    # ALL Known BaOzimh watermarked CDNs
+    watermarked_domains = [
+        r'baozicdn\.com',
+        r'tw\.baozicdn\.com', 
+        r'hk\.baozicdn\.com',
+        r'jp\.baozicdn\.com',
+        r'kr\.baozicdn\.com',
+        r'app\.baozimh\.com',
+        r'mobile\.baozimh\.com'
+    ]
+    
+    # ALL Clean CDN targets
+    clean_domains = [
+        'static-tw.baozimh.com',
+        'static.baozimh.com', 
+        'img.baozimh.com'
+    ]
+    
+    # Extract path after domain
+    path_match = re.search(r'https?://[^/]+/(.+)$', img_url)
+    if not path_match: return img_url
+    path = path_match.group(1)
+
+    # If it's already one of our targets, just return it
+    current_domain = urlparse(img_url).netloc
+    if current_domain in clean_domains:
+        return img_url
+
+    # Check if it's a known watermarked domain
+    is_watermarked = False
+    for wm_domain in watermarked_domains:
+        if re.search(wm_domain, img_url):
+            is_watermarked = True
+            break
+    
+    if is_watermarked:
+        for clean_domain in clean_domains:
+            clean_url = f"https://{clean_domain}/{path}"
+            # Test download - return first 200 OK
+            if test_url_works(clean_url):
+                print(f"✅ BRUTE FORCE SUCCESS: {img_url} → {clean_url}")
+                return clean_url
+    
+    # Fallback to the existing dynamic detection if brute force didn't find a 200
+    if 'baozimh' in img_url.lower() or 'baozicdn' in img_url.lower():
+        clean_url = f"https://static-tw.baozimh.com/{path}"
         return clean_url
 
-    # Fallback: Dynamic detection for anything containing baozimh/baozicdn
-    if 'baozimh' in img_url.lower() or 'baozicdn' in img_url.lower():
-        # Extract path after the domain
-        path_match = re.search(r'https?://[^/]+/(.+)$', img_url)
-        if path_match:
-            clean_url = f"https://static-tw.baozimh.com/{path_match.group(1)}"
-            print(f"🔄 AUTO BYPASS: {img_url} → {clean_url}")
-            return clean_url
-            
     return img_url
 
 class BaozimhClient:
@@ -228,41 +249,58 @@ class BaozimhClient:
             return []
 
     def get_chapter_images(self, chapter_url: str) -> List[str]:
-        """Extract image URLs from a chapter page."""
+        """Extract image URLs from a chapter page, following multi-page links."""
+        all_images = []
+        current_page_url = chapter_url
+        visited_pages = set()
+        
         try:
-            response = self.session.get(chapter_url, timeout=10)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, 'html.parser')
+            while current_page_url and current_page_url not in visited_pages:
+                visited_pages.add(current_page_url)
+                logger.info(f"Fetching images from page: {current_page_url}")
+                
+                response = self.session.get(current_page_url, timeout=10)
+                response.raise_for_status()
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                # Extract images from current page
+                page_images = []
+                # Strategy 1: Look for specific class
+                img_tags = soup.find_all('img', class_='comic-contain_ui-Image_img')
+                if img_tags:
+                    for img in img_tags:
+                        src = img.get('data-src') or img.get('src')
+                        if src: page_images.append(src)
+                else:
+                    # Strategy 2: If no images found, look for any image with known CDN patterns
+                    all_imgs = soup.find_all('img')
+                    for img in all_imgs:
+                        src = img.get('data-src') or img.get('src')
+                        if src and ('/scomic/' in src or 'bzcdn' in src):
+                            page_images.append(src)
+                
+                # Apply watermark bypass to each image found
+                for img_url in page_images:
+                    if img_url not in all_images:
+                        all_images.append(img_url)
+                
+                # Check for next page link: <div class="next_chapter"><a href="...">下一頁</a></div>
+                next_link = soup.select_one('div.next_chapter a')
+                if next_link and "下一頁" in next_link.get_text():
+                    href = next_link.get('href')
+                    if href:
+                        current_page_url = urljoin(current_page_url, href)
+                    else:
+                        break
+                else:
+                    break
+                    
+            logger.info(f"✅ Complete chapter: {len(all_images)} images extracted across {len(visited_pages)} pages.")
+            return all_images
             
-            images = []
-            
-            # Strategy 1: Look for specific class (legacy)
-            img_tags = soup.find_all('img', class_='comic-contain_ui-Image_img')
-            if img_tags:
-                for img in img_tags:
-                    src = img.get('data-src') or img.get('src')
-                    if src:
-                        images.append(src)
-            else:
-                # Strategy 2: If no images found, look for any image with known CDN patterns
-                all_imgs = soup.find_all('img')
-                for img in all_imgs:
-                    src = img.get('data-src') or img.get('src')
-                    if src and ('/scomic/' in src or 'bzcdn' in src):
-                        images.append(src)
-            
-            # Deduplicate while preserving order
-            seen = set()
-            unique_images = []
-            for img in images:
-                if img not in seen:
-                    seen.add(img)
-                    unique_images.append(img)
-            
-            return unique_images
         except Exception as e:
-            logger.error(f"Failed to get chapter images: {e}")
-            return []
+            logger.error(f"Failed to get chapter images from {chapter_url}: {e}")
+            return all_images
 
     def get_chapter_id_from_url(self, chapter_url: str) -> Optional[str]:
         """Extract chapter ID from the chapter page URL or content."""
@@ -288,7 +326,9 @@ class BaozimhClient:
     def download_image(self, url: str, filepath: str) -> bool:
         """Download a single image."""
         try:
-            # Apply watermark bypass
+            # Apply universal watermark bypass (Community Upgrade)
+            # Since we can't easily import from md_gui.py, we should have it here or use the local one
+            # The local baozimh_watermark_bypass will be updated to match the universal one
             url = baozimh_watermark_bypass(url)
             
             response = self.session.get(url, stream=True, timeout=10)

@@ -287,6 +287,68 @@ def extract_newtoki_images_pro(driver):
     # Dedupe
     return list(dict.fromkeys(image_urls))
 
+def test_url_works(url, timeout=5):
+    """Quick HEAD request - does URL return 200?"""
+    try:
+        resp = requests.head(url, timeout=timeout, allow_redirects=True)
+        return resp.status_code == 200
+    except:
+        return False
+
+def baozimh_universal_watermark_bypass(img_url):
+    """Brute force ALL BaOzimh CDN patterns → find clean version"""
+    if not img_url: return img_url
+    
+    # ALL Known BaOzimh watermarked CDNs
+    watermarked_domains = [
+        r'baozicdn\.com',
+        r'tw\.baozicdn\.com', 
+        r'hk\.baozicdn\.com',
+        r'jp\.baozicdn\.com',
+        r'kr\.baozicdn\.com',
+        r'app\.baozimh\.com',
+        r'mobile\.baozimh\.com'
+    ]
+    
+    # ALL Clean CDN targets
+    clean_domains = [
+        'static-tw.baozimh.com',
+        'static.baozimh.com', 
+        'img.baozimh.com'
+    ]
+    
+    # Extract path after domain
+    path_match = re.search(r'https?://[^/]+/(.+)$', img_url)
+    if not path_match: return img_url
+    path = path_match.group(1)
+
+    # If it's already one of our targets, just return it
+    current_domain = urlparse(img_url).netloc
+    if current_domain in clean_domains:
+        return img_url
+
+    # Check if it's a known watermarked domain
+    is_watermarked = False
+    for wm_domain in watermarked_domains:
+        if re.search(wm_domain, img_url):
+            is_watermarked = True
+            break
+    
+    if is_watermarked:
+        for clean_domain in clean_domains:
+            clean_url = f"https://{clean_domain}/{path}"
+            # Test download - return first 200 OK
+            if test_url_works(clean_url):
+                print(f"✅ BRUTE FORCE SUCCESS: {img_url} → {clean_url}")
+                return clean_url
+    
+    # Fallback to the existing dynamic detection if brute force didn't find a 200
+    if 'baozimh' in img_url.lower() or 'baozicdn' in img_url.lower():
+        clean_url = f"https://static-tw.baozimh.com/{path}"
+        return clean_url
+
+    return img_url
+
 def baozimh_watermark_bypass(img_url):
     """Universal BaOzimh watermark removal - ALL CDN patterns"""
     if not img_url: return img_url
@@ -1726,7 +1788,7 @@ class DownloadWorker(QThread):
                 if not self._is_running: return
                 
                 # Apply Baozimh watermark bypass (Community Upgrade)
-                img_url = baozimh_watermark_bypass(img_url)
+                img_url = baozimh_universal_watermark_bypass(img_url)
                 
                 time.sleep(random.uniform(4.0, 10.0)) # Even slower image pacing
                 
@@ -1862,7 +1924,7 @@ class DownloadWorker(QThread):
                     if not self._is_running: break
                     
                     # Apply Baozimh watermark bypass
-                    url = baozimh_watermark_bypass(url)
+                    url = baozimh_universal_watermark_bypass(url)
                     
                     fname = f"{j:03d}.jpg"
                     if "." in url:
