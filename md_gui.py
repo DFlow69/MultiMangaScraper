@@ -371,31 +371,82 @@ def extract_images_with_autoscroll(driver, max_scrolls=10):
     print(f"✅ Found {len(image_urls)} images after scrolling")
     return image_urls
 
-def extract_complete_baozimh_chapter_fixed(driver):
-    """FIXED: No loopbacks + Sequential prediction + Auto-scroll"""
+def is_last_page_baozimh(driver, current_images, last_page_images):
+    """Detect end with icon-xiayibu + duplicate image count"""
+    soup = BeautifulSoup(driver.page_source, 'html.parser')
+    
+    # 1. LAST PAGE ICON (icon-xiayibu = END)
+    if soup.select_one('span.iconfont.icon-xiayibu'):
+        print("✅ LAST PAGE: icon-xiayibu detected")
+        return True
+    
+    # 2. DUPLICATE CONTENT (same images as previous page)
+    if last_page_images:
+        current_set = set(current_images)
+        last_set = set(last_page_images)
+        if len(current_set & last_set) > len(current_set) * 0.8:
+            print("✅ LAST PAGE: Duplicate images detected")
+            return True
+    
+    # 3. NO NEXT LINK + consistent image count
+    next_link = soup.select_one('div.next_chapter a[href*="_"], .next-page a')
+    if not next_link and last_page_images and len(current_images) == len(last_page_images):
+        print("✅ LAST PAGE: No next link + stable images")
+        return True
+        
+    return False
+
+def extract_complete_baozimh_chapter_final(driver):
+    """FIXED: Stops at icon-xiayibu + duplicate detection"""
     all_images = []
     visited_urls = set()
-    base_url = driver.current_url
     page_num = 1
+    last_page_images = []
+    consecutive_empty = 0
+    base_url = driver.current_url
      
-    while page_num <= 20:
+    while page_num <= 15:  # Reasonable max
         current_url = driver.current_url
         pure_url = current_url.split('#')[0].split('?')[0]
         
         if pure_url in visited_urls:
-            print("🔄 LOOP DETECTED - stopping")
+            print("🔄 LOOP DETECTED - ENDING")
             break
         visited_urls.add(pure_url)
         
         print(f"📄 Page {page_num}: {current_url}")
         
-        # SCROLL + EXTRACT
+        # AUTO-SCROLL + EXTRACT
         page_images = extract_images_with_autoscroll(driver)
+        
+        # LAST PAGE CHECKS
+        if is_last_page_baozimh(driver, page_images, last_page_images):
+            # Still add these images if they aren't complete duplicates
+            if page_images:
+                clean_images = [baozimh_universal_watermark_bypass(url) for url in page_images]
+                for img in clean_images:
+                    if img not in all_images:
+                        all_images.append(img)
+            print("🎉 LAST PAGE CONFIRMED!")
+            break
+            
         if page_images:
-            # Apply bypass immediately
             clean_images = [baozimh_universal_watermark_bypass(url) for url in page_images]
-            all_images.extend(clean_images)
+            # Dedupe while adding
+            for img in clean_images:
+                if img not in all_images:
+                    all_images.append(img)
+            print(f"   → {len(page_images)} images found (total: {len(all_images)})")
+            consecutive_empty = 0
+        else:
+            consecutive_empty += 1
+            print("   → EMPTY PAGE")
+            if consecutive_empty >= 2:
+                print("✅ NO PROGRESS - ENDING")
+                break
          
+        last_page_images = page_images
+        
         # NEXT LINK
         soup = BeautifulSoup(driver.page_source, 'html.parser')
         next_link = soup.select_one('div.next_chapter a[href*="_"], .next-page a, a[href*="下一頁"]')
@@ -403,8 +454,8 @@ def extract_complete_baozimh_chapter_fixed(driver):
         if next_link:
             next_href = next_link.get('href')
             next_url = urljoin(current_url, next_href)
-            if next_url.split('#')[0] not in visited_urls:
-                print(f"🔗 Next link: {next_url}")
+            if next_url.split('#')[0] not in visited_urls and "#bottom" not in next_href:
+                print(f"🔗 Next link found: {next_url}")
                 driver.get(next_url)
                 page_num += 1
                 time.sleep(2)
@@ -419,10 +470,10 @@ def extract_complete_baozimh_chapter_fixed(driver):
             predicted = re.sub(r'_(\d+)\.html$', lambda m: f"_{int(m.group(1))+1}.html", pure_url)
             
         if predicted and predicted not in visited_urls:
-            print(f"🔮 Predicting: {predicted}")
+            print(f"🔮 Predicting next page: {predicted}")
             driver.get(predicted)
             time.sleep(2)
-            if "404" in driver.title or not extract_images_with_autoscroll(driver, max_scrolls=1):
+            if "404" in driver.title:
                 break
             page_num += 1
             continue
@@ -433,7 +484,7 @@ def extract_complete_baozimh_chapter_fixed(driver):
     return list(dict.fromkeys(all_images))
 
 def extract_complete_baozimh_chapter(driver):
-    return extract_complete_baozimh_chapter_fixed(driver)
+    return extract_complete_baozimh_chapter_final(driver)
 
 def api_get(path: str, params: dict | None = None) -> dict:
     url = API.rstrip("/") + "/" + path.lstrip("/")
