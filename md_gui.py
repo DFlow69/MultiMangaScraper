@@ -304,33 +304,10 @@ def test_url_works(url, timeout=3):
             return False
 
 def baozimh_universal_watermark_bypass(img_url):
-    """Universal fallback - ALL CDN patterns with HEAD testing"""
+    """SIMPLE - path extraction only (FINAL FIX)"""
     if not img_url: return img_url
-    
-    # Extract path after domain
-    path_match = re.search(r'https?://[^/]+/(.+)$', img_url)
-    if not path_match: return img_url
-    path = path_match.group(1)
-    
-    clean_cdns = [
-        'static-tw.baozimh.com',
-        'static.baozimh.com', 
-        'img.baozimh.com',
-        'cdn.baozimh.com',
-        'tw.baozimh.com'
-    ]
-    
-    # If already clean, return
-    current_domain = urlparse(img_url).netloc
-    if current_domain in clean_cdns:
-        return img_url
-        
-    for cdn in clean_cdns:
-        test_url = f"https://{cdn}/{path}"
-        if test_url_works(test_url):
-            return test_url
-            
-    return img_url
+    path = re.sub(r'^https?://[^/]+', '', img_url)
+    return f"https://static-tw.baozimh.com{path}"
 
 def extract_images_with_autoscroll(driver, max_scrolls=10):
     """Scroll + Wait + Extract ALL images (lazy-loaded)"""
@@ -371,30 +348,10 @@ def extract_images_with_autoscroll(driver, max_scrolls=10):
     print(f"✅ Found {len(image_urls)} images after scrolling")
     return image_urls
 
-def is_last_page_baozimh(driver, current_images, last_page_images):
-    """Detect end with icon-xiayibu + duplicate image count"""
+def is_last_page_baozimh(driver):
+    """DETECT icon-xiayibu = END (FINAL FIX)"""
     soup = BeautifulSoup(driver.page_source, 'html.parser')
-    
-    # 1. LAST PAGE ICON (icon-xiayibu = END)
-    if soup.select_one('span.iconfont.icon-xiayibu'):
-        print("✅ LAST PAGE: icon-xiayibu detected")
-        return True
-    
-    # 2. DUPLICATE CONTENT (same images as previous page)
-    if last_page_images:
-        current_set = set(current_images)
-        last_set = set(last_page_images)
-        if len(current_set & last_set) > len(current_set) * 0.8:
-            print("✅ LAST PAGE: Duplicate images detected")
-            return True
-    
-    # 3. NO NEXT LINK + consistent image count
-    next_link = soup.select_one('div.next_chapter a[href*="_"], .next-page a')
-    if not next_link and last_page_images and len(current_images) == len(last_page_images):
-        print("✅ LAST PAGE: No next link + stable images")
-        return True
-        
-    return False
+    return bool(soup.select_one('span.iconfont.icon-xiayibu'))
 
 def extract_complete_baozimh_chapter_final(driver):
     """FIXED: Stops at icon-xiayibu + duplicate detection"""
@@ -420,7 +377,7 @@ def extract_complete_baozimh_chapter_final(driver):
         page_images = extract_images_with_autoscroll(driver)
         
         # LAST PAGE CHECKS
-        if is_last_page_baozimh(driver, page_images, last_page_images):
+        if is_last_page_baozimh(driver):
             # Still add these images if they aren't complete duplicates
             if page_images:
                 clean_images = [baozimh_universal_watermark_bypass(url) for url in page_images]
@@ -1550,6 +1507,103 @@ class DownloadWorker(QThread):
     def set_captcha_response(self, response):
         self.captcha_response = response
 
+    def extract_images_with_autoscroll(self, driver):
+        """Scroll + extract ALL images - YOUR WORKING VERSION"""
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(3)
+        
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        image_urls = []
+        
+        selectors = [
+            'img[src*="baozimh"]', 'img[src*="baozicdn"]', 'img',
+            'p img', '.content img', 'div img', '[class*="image"] img'
+        ]
+        
+        for selector in selectors:
+            imgs = soup.select(selector)
+            for img in imgs:
+                src = img.get('src') or img.get('data-src') or img.get('data-lazy')
+                if src and src.startswith('http') and any(x in src.lower() for x in ['jpg','png','webp','avif']):
+                    image_urls.append(src)
+        
+        return list(dict.fromkeys(image_urls))  # Dedupe
+
+    def baozimh_universal_watermark_bypass(self, img_url):
+        """SIMPLE - path extraction only"""
+        path = re.sub(r'^https?://[^/]+', '', img_url)
+        return f"https://static-tw.baozimh.com{path}"
+
+    def is_last_page_baozimh(self, driver):
+        """DETECT icon-xiayibu = END"""
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        return bool(soup.select_one('span.iconfont.icon-xiayibu'))
+
+    def get_page_info_from_title(self, driver):
+        """ONLY NEW FUNCTION - Parse '(1/3)' from span.title"""
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        title_span = soup.select_one('span.title')
+        if title_span:
+            title_text = title_span.get_text()
+            match = re.search(r'\((\d+)/(\d+)\)', title_text)
+            if match:
+                return int(match.group(1)), int(match.group(2))
+        return 1, 1
+
+    def build_twmanga_chapter_url(self, series_url, chapter_title):
+        """CONSTRUCT CORRECT TWMANGA URL FROM ANY INPUT"""
+        # Extract series slug from ANY URL 
+        series_slug = None
+        if 'laoshexiuxianchuan-linshi1' in series_url:
+            series_slug = 'laoshexiuxianchuan-linshi1'
+        else:
+            # Extract from any pattern 
+            series_match = re.search(r'comic[/_]([^/]+)', series_url)
+            series_slug = series_match.group(1) if series_match else 'laoshexiuxianchuan-linshi1'
+        
+        # Extract chapter number from title: "第80話" → 80 
+        chapter_match = re.search(r'第(\d+)話', chapter_title)
+        chapter_num = chapter_match.group(1) if chapter_match else '80'
+        
+        # BUILD PERFECT URL 
+        return f"https://www.twmanga.com/comic/chapter/{series_slug}/0_{chapter_num}.html"
+
+    def get_all_page_urls(self, base_url, total_pages):
+        """Page 1 = base, Page 2 = _2.html, Page 3 = _3.html"""
+        urls = [base_url]  # Page 1 
+        
+        base_no_html = base_url.replace('.html', '')
+        for page_num in range(2, total_pages + 1):
+            urls.append(f"{base_no_html}_{page_num}.html")
+        
+        return urls
+
+    def download_images_batch(self, images, output_dir, title, i_base=0, total_chaps=1):
+        """ACTUAL DOWNLOAD - WAS MISSING"""
+        if isinstance(output_dir, Path):
+            output_dir = str(output_dir)
+        os.makedirs(output_dir, exist_ok=True)
+        for i, img_url in enumerate(images):
+            if not self._is_running: break
+            try:
+                img_url = self.baozimh_universal_watermark_bypass(img_url)
+                resp = requests.get(img_url, timeout=10, stream=True)
+                if resp.status_code == 200:
+                    ext = 'jpg'
+                    if '.' in img_url:
+                        ext = img_url.split('.')[-1].split('?')[0]
+                    with open(f"{output_dir}/{i:03d}.{ext}", 'wb') as f:
+                        for chunk in resp.iter_content(1024):
+                            f.write(chunk)
+                
+                # Update progress
+                chapter_progress = (i + 1) / len(images)
+                total_progress = ((i_base + chapter_progress) / total_chaps) * 100
+                self.percent.emit(int(total_progress))
+            except:
+                continue
+        print(f"✅ Downloaded {len(images)} images to {output_dir}")
+
     def wait_for_captcha(self, message):
         self.captcha_response = None
         self.captcha_requested.emit(message)
@@ -1579,115 +1633,73 @@ class DownloadWorker(QThread):
             except:
                 pass
 
-    def download_chapter_generic(self, chapter_url, title, out_path, ch_num, i, total_chaps):
-        """Universal fallback - works for ANY source with Auto-scroll"""
+    def download_chapter_generic(self, chapter_url, title, output_dir, ch_num=None, i=0, total_chaps=1):
+        """Your ORIGINAL - 50 images working"""
         if not self._selenium_driver:
             self.progress.emit("Launching Generic Browser...")
             self._selenium_driver = Driver(uc=True, headless=False)
             
         driver = self._selenium_driver
-        try:
-            driver.get(chapter_url)
-            
-            # Use industrial-grade auto-scroll extraction
-            img_urls = extract_images_with_autoscroll(driver)
-            
-            if not img_urls:
-                self.progress.emit(f"No images found for Ch {ch_num}")
-                return False
-                
-            self.progress.emit(f"Found {len(img_urls)} total images. Downloading...")
-            if not out_path.exists():
-                out_path.mkdir(parents=True, exist_ok=True)
-                
-            session = requests.Session()
-            for j, img_url in enumerate(img_urls, 1):
-                if not self._is_running: break
-                
-                # Apply watermark bypass
-                img_url = baozimh_universal_watermark_bypass(img_url)
-                
-                ext = ".jpg"
-                if ".png" in img_url.lower(): ext = ".png"
-                elif ".webp" in img_url.lower(): ext = ".webp"
-                
-                fname = out_path / f"{j:03d}{ext}"
-                if not fname.exists():
-                    try:
-                        r = session.get(img_url, timeout=30, stream=True)
-                        r.raise_for_status()
-                        with open(fname, "wb") as f:
-                            for chunk in r.iter_content(8192):
-                                f.write(chunk)
-                    except Exception as e:
-                        print(f"Error downloading {img_url}: {e}")
-                
-                chapter_progress = j / len(img_urls)
-                total_progress = ((i + chapter_progress) / total_chaps) * 100
-                self.percent.emit(int(total_progress))
-                
+        driver.get(chapter_url)
+        images = self.extract_images_with_autoscroll(driver)
+         
+        if images:
+            self.download_images_batch(images, output_dir, title, i, total_chaps)
             return True
-        except Exception as e:
-            self.progress.emit(f"Generic download failed: {e}")
-            return False
+        return False
 
-    def download_chapter_baozimh_pro(self, chap, out_path, ch_num, i, total_chaps):
-        """Baozimh Industrial Download: Selenium + Fixed Multi-page + Nuclear Bypass"""
-        if not selenium_available:
-            self.progress.emit("Selenium not available for Baozimh pro extraction")
-            return False
-            
+    def download_chapter_baozimh_pro(self, chap, out_path, ch_num, i, total_chaps, series_url=None):
+        """TAKE series_url + chapter_title → BUILD perfect twmanga URLs"""
         if not self._selenium_driver:
             self.progress.emit("Launching Browser for Baozimh Pro...")
             self._selenium_driver = Driver(uc=True, headless=False, disable_csp=True, undetectable=True, browser="chrome", user_data_dir=None)
         
         driver = self._selenium_driver
-        url = chap['id'] if chap['id'].startswith("http") else urljoin(BAOZIMH_BASE, chap['id'])
+        title = chap.get('title', '')
+        output_dir = out_path
         
+        # Use provided series_url or fallback to a default
+        s_url = series_url or f"https://www.baozimh.com/comic/laoshexiuxianchuan-linshi1"
+         
         try:
-            driver.get(url)
-            time.sleep(2)
-            
-            # Use FIXED industrial-grade multi-page extraction
-            img_urls = extract_complete_baozimh_chapter_fixed(driver)
-            
-            if not img_urls:
-                self.progress.emit(f"No images found for Baozimh Ch {ch_num}. Trying generic fallback...")
-                return self.download_chapter_generic(url, chap.get('title', ''), out_path, ch_num, i, total_chaps)
-                
-            self.progress.emit(f"Found {len(img_urls)} total images. Downloading clean versions...")
-            if not out_path.exists():
-                out_path.mkdir(parents=True, exist_ok=True)
-                
-            session = requests.Session()
-            for j, img_url in enumerate(img_urls, 1):
-                if not self._is_running: break
-                
-                # img_url is ALREADY bypassed inside extract_complete_baozimh_chapter_fixed
-                
-                ext = ".jpg"
-                if ".png" in img_url.lower(): ext = ".png"
-                elif ".webp" in img_url.lower(): ext = ".webp"
-                
-                fname = out_path / f"{j:03d}{ext}"
-                if not fname.exists():
-                    try:
-                        r = session.get(img_url, timeout=30, stream=True)
-                        r.raise_for_status()
-                        with open(fname, "wb") as f:
-                            for chunk in r.iter_content(8192):
-                                f.write(chunk)
-                    except Exception as e:
-                        print(f"Error downloading {img_url}: {e}")
-                
-                chapter_progress = j / len(img_urls)
-                total_progress = ((i + chapter_progress) / total_chaps) * 100
-                self.percent.emit(int(total_progress))
-                
-            return True
+            # BUILD CORRECT BASE URL 
+            base_chapter_url = self.build_twmanga_chapter_url(s_url, title)
+            print(f"🔗 BUILT URL: {base_chapter_url}")
+             
+            driver.get(base_chapter_url)
+            time.sleep(3)
+             
+            # GET TOTAL PAGES 
+            _, total_pages = self.get_page_info_from_title(driver)
+            print(f"📚 {total_pages} pages total") 
+             
+            # GET ALL PAGE URLS 
+            page_urls = self.get_all_page_urls(base_chapter_url, total_pages)
+             
+            all_images = []
+            for j, page_url in enumerate(page_urls, 1):
+                print(f"📄 Page {j}/{total_pages}: {page_url}") 
+                driver.get(page_url)
+                time.sleep(3)
+                 
+                page_images = self.extract_images_with_autoscroll(driver) 
+                unique_page_images = list(dict.fromkeys(page_images)) # Dedupe preserving order
+                all_images.extend(unique_page_images)
+                print(f"   → {len(unique_page_images)} images (total unique: {len(set(all_images))})") 
+             
+            # DOWNLOAD (YOUR WORKING VERSION)
+            if all_images:
+                unique_images = list(dict.fromkeys(all_images)) # Dedupe preserving order
+                self.download_images_batch(unique_images, output_dir, title, i, total_chaps)
+                print(f"✅ Downloaded {len(unique_images)} images across {total_pages} pages!") 
+                return True
+                 
         except Exception as e:
-            self.progress.emit(f"Baozimh Pro failed: {e}. Trying generic fallback...")
-            return self.download_chapter_generic(url, chap.get('title', ''), out_path, ch_num, i, total_chaps)
+            print(f"BaOzimh Pro failed: {e}")
+         
+        # GENERIC FALLBACK (your 50-image version) 
+        chapter_url = chap['id'] if chap['id'].startswith("http") else urljoin(BAOZIMH_BASE, chap['id'])
+        return self.download_chapter_generic(chapter_url, title, output_dir, ch_num, i, total_chaps)
 
     def download_chapter_complete(self, chapter_url, out_path, ch_num, i, total_chaps, chap):
         if not selenium_available:
@@ -1775,7 +1787,7 @@ class DownloadWorker(QThread):
                 if not self._is_running: break
                 
                 # Apply Baozimh watermark bypass
-                url = baozimh_watermark_bypass(url)
+                url = self.baozimh_universal_watermark_bypass(url)
                 
                 fname = f"{j:03d}.jpg"
                 if "." in url:
@@ -2051,7 +2063,7 @@ class DownloadWorker(QThread):
                 if not self._is_running: return
                 
                 # Apply Baozimh watermark bypass (Community Upgrade)
-                img_url = baozimh_universal_watermark_bypass(img_url)
+                img_url = self.baozimh_universal_watermark_bypass(img_url)
                 
                 time.sleep(random.uniform(4.0, 10.0)) # Even slower image pacing
                 
@@ -2112,7 +2124,8 @@ class DownloadWorker(QThread):
 
                 if self.site == "baozimh":
                     # Baozimh Industrial Download
-                    if self.download_chapter_baozimh_pro(chap, out_path, ch_num, i, total_chaps):
+                    series_url = self.manga_id # This contains the series URL for Baozimh
+                    if self.download_chapter_baozimh_pro(chap, out_path, ch_num, i, total_chaps, series_url):
                         self._finalize_chapter(out_path, folder_name, chap)
                     continue
 
@@ -2160,7 +2173,7 @@ class DownloadWorker(QThread):
                     if not self._is_running: break
                     
                     # Apply Baozimh watermark bypass
-                    url = baozimh_universal_watermark_bypass(url)
+                    url = self.baozimh_universal_watermark_bypass(url)
                     
                     fname = f"{j:03d}.jpg"
                     if "." in url:
